@@ -51,6 +51,21 @@ vi.mock("@/components/chat/ChatPanel", () => ({
   },
 }));
 
+// Step 5 (persistent chat history): ConversationSidebar uses React Query's
+// useQuery for real, which throws without a QueryClientProvider ancestor —
+// none of these shell tests provide one (they test the shell's own job:
+// which panels render where, tab switching, error-boundary isolation), so
+// a real ConversationSidebar would trip the Chat panel's own
+// PanelErrorBoundary and fail every "mock-chat is present" assertion here.
+// Mocked with the same lightweight stand-in convention as its three
+// siblings above — ConversationSidebar's own real behavior is covered by
+// tests/component/ConversationSidebar.test.tsx.
+vi.mock("@/components/shared/ConversationSidebar", () => ({
+  ConversationSidebar: ({ workspaceId }: { workspaceId: string }) => (
+    <div data-testid="mock-conversation-sidebar">Conversations for {workspaceId}</div>
+  ),
+}));
+
 import { WorkspaceDashboardShell } from "@/components/shared/workspace-dashboard-shell";
 
 const initialVideoFile = {

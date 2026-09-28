@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, given, settings as hyp_settings
 from hypothesis import strategies as st
 
+from app.api.auth_dependency import get_service_jwt_verifier
 from app.api.file_storage import FileStorage
 from app.api.health import router as health_router
 from app.api.job_store import InMemoryJobStore
@@ -29,6 +30,8 @@ from app.api.logging_middleware import RequestLoggingMiddleware
 from app.api.routes import get_file_storage, get_job_store, get_settings, router
 from app.config.settings import Settings
 from app.logging_config import _JsonFormatter, _redact_value, configure_logging, job_id_var, request_id_var
+from app.security.service_jwt import ServiceJWTVerifier
+from tests.test_api_routes import _AUDIENCE, _ISSUER, _KID, _PUBLIC_PEM, _SCOPE, mint_token
 
 
 def pdf_upload(content: bytes = b"%PDF-1.4 fake content", content_type: str = "application/pdf"):
@@ -52,12 +55,29 @@ def full_app(tmp_path):
     app.dependency_overrides[get_job_store] = lambda: job_store
     app.dependency_overrides[get_file_storage] = lambda: FileStorage(settings=settings)
     app.dependency_overrides[get_settings] = lambda: settings
+    # Security Hardening Stage 1: these routes now require an internal
+    # service JWT -- see app/api/routes.py's own module docstring.
+    app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+        public_keys_by_kid={_KID: _PUBLIC_PEM},
+        expected_issuer=_ISSUER,
+        expected_audience=_AUDIENCE,
+        required_scope=_SCOPE,
+    )
+    # Stage 2 Part B: isolated per-test fakeredis instance -- see
+    # test_api_routes.py's own client fixture for the full rationale.
+    import fakeredis
+
+    from app.api.routes import get_ingestion_lock
+    from app.pipeline.ingestion_lock import IngestionLock
+
+    ingestion_lock = IngestionLock(fakeredis.FakeRedis(decode_responses=True))
+    app.dependency_overrides[get_ingestion_lock] = lambda: ingestion_lock
     return app
 
 
 @pytest.fixture
 def full_client(full_app):
-    return TestClient(full_app)
+    return TestClient(full_app, headers={"Authorization": f"Bearer {mint_token()}"})
 
 
 # ---------------------------------------------------------------------------

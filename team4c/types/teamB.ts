@@ -79,14 +79,18 @@ export interface TeamBQueryRequest {
  * one even when the request's own `session_id` was `null`) --
  * `retrieval_metadata` is an intentionally open `dict[str, Any]` on the
  * 4B side (no fixed schema is specified), so it is typed the same way
- * here rather than inventing a closed shape 4B itself doesn't declare;
- * it is captured on this type (Requirement J: "preserved... if the
- * current 4C integration type exposes it") but is NOT currently threaded
- * through into 4C's UI-facing `SourceAttribution`/chat-response shape --
- * it has no per-citation meaning (it's response-level, not
- * per-attribution), so app/api/chat/route.ts's existing citation
- * pipeline has no natural per-item slot for it; it remains available on
- * this type for any future, explicit response-level use.
+ * here rather than inventing a closed shape 4B itself doesn't declare.
+ * Two of its keys are read as explicit, response-level (never
+ * per-citation) signals by app/api/chat/route.ts's citation-suppression
+ * logic -- `chunks_retrieved` (Stage 7: a number; `<= 0` means nothing
+ * was retrieved at all) and `grounded` (Stage 8: a boolean; `false`
+ * means chunks WERE retrieved but the model explicitly reported it
+ * could not ground an answer in them -- "retrieved-but-refused", see
+ * team4b/app/services/llm_generator.py's `GenerationResult`). Both are
+ * read defensively (`typeof x === "number"` / `"boolean"`) since this
+ * dict's schema is intentionally open and a value could be absent,
+ * non-conforming, or come from an older backend -- neither key's
+ * absence is ever treated as `true`/non-zero, only as "no signal."
  */
 export interface TeamBQueryResponse {
   answer: string;
@@ -142,6 +146,106 @@ export interface TeamBAuthContext {
   workspace_id: string;
 }
 
+/**
+ * Step 7 — session restoration after Team 4B's Redis session TTL expires.
+ * Mirrors the real `POST /api/v1/sessions/{session_id}/seed` contract
+ * (team4b/app/api/routes.py's `SeedTurn`/`SeedSessionRequest`) exactly:
+ * `turns` in chronological (oldest-first) order, `timestamp` optional.
+ */
+export interface TeamBSeedTurn {
+  role: "user" | "assistant";
+  content: string;
+  timestamp?: number;
+}
+
+export interface TeamBSeedResponse {
+  session_id: string;
+  seeded: boolean;
+  turn_count: number;
+}
+
+/**
+ * Stage 9B — real token streaming. Mirrors Team 4B's own NDJSON wire
+ * events exactly (`POST /api/v1/query/stream`, team4b/app/api/routes.py):
+ * a `"delta"` event carries one genuinely-generated text fragment as it
+ * arrives (never a client-side-simulated chunk of an already-complete
+ * answer); a `"done"` event carries the SAME shape as `TeamBQueryResponse`
+ * (answer, session_id, source_attributions, retrieval_metadata) --
+ * Team 4B deliberately delays citations and the Stage 8 grounding signal
+ * until generation is fully finished, exactly as `TeamBQueryResponse`
+ * already does for the non-streaming route, so no new response shape is
+ * invented here; a `"error"` event means generation failed AFTER the
+ * HTTP response was already committed (streaming had begun) -- the
+ * disclosed trade-off of HTTP streaming, see team4b's own Stage 9B report
+ * -- and is never followed by a `"done"` event for the same request.
+ */
+export interface TeamBStreamDelta {
+  type: "delta";
+  text: string;
+}
+
+export type TeamBStreamDone = TeamBQueryResponse & { type: "done" };
+
+export interface TeamBStreamError {
+  type: "error";
+  detail: string;
+}
+
+export type TeamBStreamEvent = TeamBStreamDelta | TeamBStreamDone | TeamBStreamError;
+
 export interface TeamBService {
   query(request: TeamBQueryRequest & Partial<TeamBMockOnlyContext> & Partial<TeamBAuthContext>): Promise<TeamBQueryResponse>;
+
+  /**
+   * Stage 9B — the streaming counterpart to `query()` above, yielding
+   * `TeamBStreamEvent`s as they genuinely arrive. OPTIONAL for the same
+   * reason `hasSession`/`seedSession`/`deleteSession` are: every existing
+   * `TeamBService`-shaped test double across this codebase (~90+ call
+   * sites in tests/unit/chat-api.test.ts alone) implements only `query()`,
+   * predating this feature, and none of them should be forced to change.
+   * `app/api/chat/route.ts` calls this ONLY when a given implementation
+   * provides it, falling back to `query()` (plus the pre-existing
+   * simulated word-by-word replay) otherwise -- see that route's own
+   * comments for the exact fallback contract.
+   */
+  queryStream?(
+    request: TeamBQueryRequest & Partial<TeamBMockOnlyContext> & Partial<TeamBAuthContext>
+  ): AsyncIterable<TeamBStreamEvent>;
+
+  /**
+   * Whether `sessionId` currently has a live (non-expired) session on
+   * Team 4B — backed by `GET /api/v1/sessions/{id}/history` (a 404 there
+   * means "missing"). STEP 2 REMEDIATION: this endpoint now requires the
+   * same internal service JWT as `query`/`seedSession` (previously the
+   * only unauthenticated internal-service route) — `auth` is required
+   * here for exactly the same reason it's required on `seedSession`.
+   * OPTIONAL on this interface: every existing `TeamBService`-shaped test
+   * double across this codebase implements only `query()`, and adding a
+   * required method here would force every one of those (unrelated to
+   * this feature) to be rewritten. Callers (`lib/restoreSession.ts`) skip
+   * restoration entirely when a given implementation doesn't provide
+   * this — never a hard runtime dependency.
+   */
+  hasSession?(sessionId: string, auth: TeamBAuthContext): Promise<boolean>;
+
+  /** Restores `sessionId`'s history on Team 4B from `turns` — see
+   * `hasSession`'s docstring for why this is optional. */
+  seedSession?(
+    sessionId: string,
+    turns: TeamBSeedTurn[],
+    auth: TeamBAuthContext
+  ): Promise<TeamBSeedResponse>;
+
+  /**
+   * STEP 5 — best-effort cleanup of `sessionId`'s Redis history on Team
+   * 4B, called when the Team 4C Conversation it belongs to is deleted.
+   * Backed by `DELETE /api/v1/sessions/{id}` (Step 3 remediation), gated
+   * by the same internal service JWT as every other session route.
+   * OPTIONAL for the same reason `hasSession`/`seedSession` are: never a
+   * hard runtime dependency for existing test doubles. Callers treat a
+   * failure here as non-fatal — the Team 4C-side deletion (the
+   * authoritative one) must never be blocked or reverted by Team 4B
+   * being unreachable.
+   */
+  deleteSession?(sessionId: string, auth: TeamBAuthContext): Promise<boolean>;
 }

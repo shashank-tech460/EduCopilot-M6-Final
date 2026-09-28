@@ -5,6 +5,12 @@ to an external developer, an interviewer, or an evaluator. Answers are in
 plain English first, with technical detail where it matters. Cross-references
 point to the document with full depth on that topic.
 
+For a more structured, code-cited Q&A set organized by team and topic (with a short answer,
+detailed explanation, example, and code reference for each), see
+[docs/interview/](interview/), starting with
+[interview/QUICK_VIVA_QA.md](interview/QUICK_VIVA_QA.md). For narrative deep-dives into how
+each service actually works internally, see [docs/learning/](learning/).
+
 ---
 
 ## Basic
@@ -40,9 +46,13 @@ AI Tutor with grounded, cited answers, adaptive answer formatting
 hybrid semantic+keyword retrieval, and account/workspace isolation.
 
 **What makes it different?**
-It never claims to answer from general knowledge — every answer is scoped
-to the student's own workspace, with a visible citation for every claim,
-and an honest decline when the material doesn't cover the question.
+It's designed not to answer from general knowledge — retrieval is scoped to the
+student's own workspace, and answers are built to carry citations back to retrieval
+metadata rather than invented ones. This is the intended, code-enforced behavior, not a
+guarantee that every claim in every answer is correct or individually cited — retrieval
+can miss relevant material, and the system is designed to decline honestly when the
+material doesn't cover the question, but an incorrect or insufficiently-supported
+answer remains possible. See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
 **What technologies are used?**
 Next.js/React/TypeScript (Team4C), FastAPI/Python (Team4A, Team4B),
@@ -368,10 +378,12 @@ different scaling/access patterns. [ARCHITECTURE.md](ARCHITECTURE.md#storage).
 
 ## Testing
 
-**What tests exist?** Team4B: a 1302-test pytest suite plus live
-scripted acceptance/security batteries. Team4C: 469 Vitest tests, a
-13-test Playwright E2E suite across 7 spec files, axe-core accessibility
-checks, TypeScript and ESLint. Full detail: [TESTING.md](TESTING.md).
+**What tests exist?** Team4A: a 913-test pytest suite. Team4B: a
+1438-test pytest suite plus live scripted acceptance/security batteries.
+Team4C: 669 Vitest tests, a 13-test Playwright E2E suite across 7 spec
+files, axe-core accessibility checks, TypeScript and ESLint. Current,
+authoritative counts: [M6_STATUS.md](M6_STATUS.md). Full detail:
+[TESTING.md](TESTING.md).
 
 **Why unit tests?** Fast, deterministic verification of individual
 functions/components in isolation.
@@ -501,7 +513,11 @@ Headline items, stated plainly:
   retrieved content instead of declining (bounded — never observed to leak
   across workspaces, only to misapply in-scope content from the wrong
   subject).
-- One lower-severity prompt-injection residual remains open
+- Prompt injection is mitigated for one specific attack pattern, not eliminated: a
+  forced-fixed-output pattern is fixed and validated (Phase 5K), but a later
+  query-neutralization attempt was tested live and did **not** stop a direct
+  instruction-override attack — it still fully succeeded against the running model.
+  A separate, lower-severity residual also remains open
   (`REPRO-SPOOF-5` — prompt-scaffold disclosure, no real secret exists to
   leak). See [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md).
 - Local LLM generation is CPU-bound and slow in this environment (30–140+
@@ -518,8 +534,10 @@ Headline items, stated plainly:
 
 **30 seconds:** "EduCopilot lets a student upload their own course PDFs
 and lecture videos, then ask an AI tutor questions about that material —
-every answer is grounded in what they actually uploaded, with a citation
-back to the exact page or timestamp, instead of the AI just guessing."
+answers are retrieved and cited from what they actually uploaded, back to
+the exact page or timestamp, instead of the AI just guessing. It's a
+design goal enforced by the pipeline, not a mathematical guarantee — real,
+disclosed exceptions exist and are documented, not hidden."
 
 **1 minute:** add — "It's built as three services: one handles turning
 documents into searchable data (ingestion), one handles finding the
@@ -744,5 +762,6 @@ table) rather than shipping the first idea that seemed to work.
 
 Clearly separated from current functionality — see
 [ROADMAP.md](ROADMAP.md) for the full list (cloud/hosted LLM option,
-object storage, horizontal scaling, observability, rate limiting,
-additional file formats, richer learning tools).
+object storage, horizontal scaling, observability, system-wide/IP-level rate limiting
+— Team4B's query endpoints already have identity-keyed limiting, see
+[SECURITY.md](SECURITY.md) — additional file formats, richer learning tools).

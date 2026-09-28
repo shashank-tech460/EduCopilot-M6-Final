@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 
-import type { TeamBService, TeamBSourceAttribution } from "@/types/teamB";
+import type { TeamBQueryRequest, TeamBMockOnlyContext, TeamBService, TeamBSourceAttribution } from "@/types/teamB";
 import { FileModel } from "@/models/File";
 import { extractPdfPages } from "@/lib/pdfExtraction";
 import { scorePages, scoreSegments, findSegmentAtTime, parseTimestampFromQuery } from "@/lib/pdfRetrieval";
@@ -277,5 +277,32 @@ export const mockTeamB: TeamBService = {
       source_attributions: [],
       retrieval_metadata: { mock: true, chunks_retrieved: 0 },
     };
+  },
+
+  /**
+   * Stage 9B — dev/test realism only. This mock has no real token
+   * generation to stream from, so it runs its own existing, unchanged
+   * `query()` above to completion first (the SAME grounded answer,
+   * SAME citations, SAME retrieval_metadata a caller would get from
+   * `query()` directly), then re-delivers that already-known answer as a
+   * word-by-word "delta" sequence before a final "done" event carrying
+   * the complete response — giving local development (`USE_MOCK_TEAM_B`
+   * unset/true) the same genuinely-incremental rendering experience as
+   * the real streaming backend, without inventing a second, divergent
+   * answer-generation path. The per-word delay below exists only so a
+   * human watching the UI can see it stream; it is not exercised by this
+   * repo's own mocked-service unit tests, which replace `getTeamBService`
+   * with their own double entirely (see tests/unit/chat-api.test.ts).
+   */
+  async *queryStream(request: TeamBQueryRequest & Partial<TeamBMockOnlyContext>) {
+    const result = await mockTeamB.query(request);
+    const words = result.answer.split(" ").filter((word) => word.length > 0);
+
+    for (const word of words) {
+      yield { type: "delta" as const, text: `${word} ` };
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    yield { type: "done" as const, ...result };
   },
 };

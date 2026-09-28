@@ -99,9 +99,8 @@ test.describe("Journey B (variant) — YouTube transcript RAG", () => {
     await expect(assistantBubble).not.toHaveText("", { timeout: 5000 });
 
     // At least one citation renders, identified by its real accessible
-    // name (the video title SourceAttribution renders as part of its
-    // button text) -- the same role-based pattern already proven correct
-    // in core-rag.spec.ts and tests/component/ChatPanel.test.tsx, rather
+    // name -- the same role-based pattern already proven correct in
+    // core-rag.spec.ts and tests/component/ChatPanel.test.tsx, rather
     // than a brittle CSS-class substring match. (An earlier version of
     // this assertion also tried to fall back to a generic
     // `[aria-disabled="true"]` locator for the "correctly disabled"
@@ -109,6 +108,23 @@ test.describe("Journey B (variant) — YouTube transcript RAG", () => {
     // video.js Picture-in-Picture control button, which made Playwright's
     // strict mode reject the combined locator as ambiguous even when the
     // real citation was genuinely present and visible.)
-    await expect(page.getByRole("button", { name: /Trigonometry/i }).first()).toBeVisible({ timeout: 5000 });
+    //
+    // Stage 10 FIX: this asserted on `/Trigonometry/i`, assuming a
+    // citation button's accessible name would contain the video's
+    // TOPIC. Confirmed live it never does -- SourceAttribution.tsx
+    // renders a video citation's accessible name as
+    // `{sourceFile} · {timestamp}` where `sourceFile` is the workspace's
+    // own stored material name, which for a YouTube material is the
+    // URL itself (e.g. "https://youtu.be/wdaBwIv7Jso · 50:11") -- "the
+    // video appears to be about trigonometry" only ever appears in the
+    // ANSWER TEXT, never in a citation button. The real flow worked
+    // perfectly (a grounded answer with "Sources (5)" citations
+    // rendered); this was purely a wrong test expectation. The "· "
+    // separator (present on every real citation, absent from the
+    // Materials panel's own unrelated "Play <url>" button) distinguishes
+    // a real citation from that other same-URL-substring button.
+    await expect(page.getByRole("button", { name: /youtu\.be\/wdaBwIv7Jso.*·/i }).first()).toBeVisible({
+      timeout: 5000,
+    });
   });
 });

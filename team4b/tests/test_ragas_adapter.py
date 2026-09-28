@@ -60,7 +60,14 @@ class TestOllamaRagasLLMWrapper:
         result = llm.generate_text(_FakePromptValue("what is RAG?"))
 
         assert client.calls == [
-            {"model": "llama3", "prompt": "what is RAG?", "timeout": 60.0, "num_gpu": None, "num_predict": None}
+            {
+                "model": "llama3",
+                "prompt": "what is RAG?",
+                "timeout": 60.0,
+                "num_gpu": None,
+                "num_predict": None,
+                "format": None,
+            }
         ]
         assert result.generations[0][0].text == "the llm's answer"
 

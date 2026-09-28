@@ -18,6 +18,7 @@ let capturedOptions: {
 const sendMessageMock = vi.fn();
 const regenerateMock = vi.fn();
 const clearErrorMock = vi.fn();
+const setMessagesMock = vi.fn();
 
 vi.mock("@ai-sdk/react", () => ({
   useChat: (options: typeof capturedOptions) => {
@@ -29,12 +30,28 @@ vi.mock("@ai-sdk/react", () => ({
       error: undefined,
       regenerate: regenerateMock,
       clearError: clearErrorMock,
+      // Step 6: useChatStream now destructures setMessages to seed a
+      // restored conversation's history — these tests pass
+      // initialMessages: [] (see the useChatStream(...) call sites
+      // below), so the seeding effect runs harmlessly with an empty
+      // array; it still needs to exist to avoid a runtime TypeError.
+      setMessages: setMessagesMock,
     };
   },
 }));
 
 vi.mock("ai", () => ({
   DefaultChatTransport: vi.fn(),
+}));
+
+// Stage 6 — useChatStream now calls useQueryClient() in its onFinish
+// callback (sidebar invalidation, covered separately in
+// useChatStream-sidebarInvalidation.test.tsx). This file's tests render
+// the hook without a QueryClientProvider, so it must be mocked here too,
+// same as @ai-sdk/react/ai above -- otherwise useQueryClient() throws
+// with no provider, unrelated to what these tests actually verify.
+vi.mock("@tanstack/react-query", () => ({
+  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
 }));
 
 import { useChatStream } from "@/hooks/useChatStream";
@@ -74,7 +91,7 @@ afterEach(() => {
 describe("useChatStream — Requirement 8.1 (queue on unreachable API)", () => {
   it("queues the message and never calls sendMessage when already offline at submit time", () => {
     vi.stubGlobal("navigator", { onLine: false });
-    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1"));
+    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1", []));
 
     act(() => {
       result.current.submitMessage("What is normalization?");
@@ -90,7 +107,7 @@ describe("useChatStream — Requirement 8.1 (queue on unreachable API)", () => {
   });
 
   it("queues the message when sendMessage was attempted but failed with a real network error (TypeError)", () => {
-    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1"));
+    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1", []));
 
     act(() => {
       result.current.submitMessage("hello");
@@ -105,7 +122,7 @@ describe("useChatStream — Requirement 8.1 (queue on unreachable API)", () => {
   });
 
   it("does NOT queue an application/HTTP error (e.g. Unauthorized) — falls through to the existing inline error path instead", () => {
-    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1"));
+    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1", []));
 
     act(() => {
       result.current.submitMessage("hello");
@@ -123,7 +140,7 @@ describe("useChatStream — Requirement 8.1 (queue on unreachable API)", () => {
     useAppStore.getState().setVideoTimestamp(1935);
     vi.stubGlobal("navigator", { onLine: false });
 
-    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1"));
+    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1", []));
     act(() => {
       result.current.submitMessage("What happens here?");
     });
@@ -141,7 +158,7 @@ describe("useChatStream — Requirement 8.2 (auto-retry on reconnect)", () => {
 
   it("flushes the queue and calls sendMessage when the browser's online event fires", async () => {
     vi.stubGlobal("navigator", { onLine: false });
-    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1"));
+    const { result, unmount } = renderHook(() => useChatStream("ws-1", "conv-1", []));
     act(() => {
       result.current.submitMessage("queued while offline");
     });
@@ -175,7 +192,7 @@ describe("useChatStream — MVP M5 correction (I): offline replay uses the ORIGI
 
     // Queued while conversation "conv-original" was active.
     const { result, rerender, unmount } = renderHook(
-      ({ conversationId }) => useChatStream("ws-1", conversationId),
+      ({ conversationId }) => useChatStream("ws-1", conversationId, []),
       { initialProps: { conversationId: "conv-original" } }
     );
     act(() => {
@@ -238,7 +255,7 @@ describe("useChatStream — MVP M5 micro-correction: replay failure never requeu
     // workspace/conversation (workspace-B / conversation-B) -- e.g. the
     // user switched while "original-item" was still queued.
     vi.stubGlobal("navigator", { onLine: true });
-    const { unmount } = renderHook(() => useChatStream("workspace-B", "conversation-B"));
+    const { unmount } = renderHook(() => useChatStream("workspace-B", "conversation-B", []));
 
     act(() => {
       window.dispatchEvent(new Event("online"));

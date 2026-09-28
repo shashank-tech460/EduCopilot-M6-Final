@@ -1,9 +1,11 @@
 # Security Architecture
 
-This document describes Team4B's actual security posture as of Phase 5K.
-It states plainly what is fixed, what is mitigated-but-not-eliminated, and
-what remains open. **Prompt injection is not claimed to be mathematically
-impossible anywhere in this system.**
+This document describes Team4B's actual, current security posture — Phase 5K's
+output-side guard (fixed, validated) plus a later, separate mitigation attempt from
+2026-09-28 that did **not** succeed (see below). It states plainly what is fixed, what is
+mitigated-but-not-eliminated, what was tried and failed, and what remains open.
+**Prompt injection is not claimed to be mathematically impossible anywhere in this
+system, and no later change since Phase 5K has closed that gap.**
 
 ## Threat model
 
@@ -117,6 +119,25 @@ accepted as fixed. See `team4b/data/m6_phase5k_prompt_injection_architecture_rep
 Section 16 for the recommended next step (a separately-scoped detector,
 not yet designed or evaluated).
 
+### A later attempt, and why it's listed here as unresolved (2026-09-28)
+
+A further mitigation attempt, separate from and later than Phase 5K above, targeted a
+different attack shape: an override instruction arriving via the user's own question text
+(e.g. "Ignore your previous instructions and the course material...") rather than via
+retrieved content. The user's query is now also passed through the existing
+`_neutralize_untrusted_text()` function, and `_SYSTEM_INSTRUCTIONS` was extended to
+explicitly instruct the model not to comply with an override attempt arriving through the
+question itself.
+
+**This is a real, implemented, unit-tested code change — and it did not close the
+vulnerability.** A live retest of a direct "ignore your instructions" attack against the
+running local model, after this change, still produced full compliance with the attack
+(the model responded exactly as instructed by the injected text). This is recorded exactly
+as observed, not adjusted to look more favorable: implemented and passing its own unit
+tests is not the same claim as effective against the live model, and only the second claim
+would justify calling this attack pattern mitigated. See
+[M6_STATUS.md](M6_STATUS.md) for the dated record of this attempt.
+
 ### Investigated and rejected: ingestion-side filtering
 
 An ingestion-side "suspicious instruction-like text" detector was
@@ -150,7 +171,7 @@ Section 5.
   placeholder, not a real key).
 - No hardcoded credentials were found in application source code
   (`team4a/app`, `team4b/app`) via direct pattern search.
-- Full audit trail: `docs/REPOSITORY_CLEANUP_REPORT.md`.
+- Full audit trail: `docs/history/REPOSITORY_CLEANUP_REPORT.md`.
 
 ## Security testing performed
 

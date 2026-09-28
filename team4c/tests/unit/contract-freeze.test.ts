@@ -173,3 +173,81 @@ describe("Team B canonical query contract (POST /api/v1/query)", () => {
     expect(sentBody).toEqual({ query: "hello", session_id: null, retrieval_config: null });
   });
 });
+
+describe("Team B session-restoration contract (Step 7 — GET history / POST seed)", () => {
+  it("STEP 2 REMEDIATION: hasSession() now sends a real Bearer JWT to the GET history endpoint", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ session_id: "s1", history: [] }) });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { realTeamB } = await import("@/services/teamB/client");
+    const exists = await realTeamB.hasSession!("s1", TEST_IDENTITY);
+
+    expect(exists).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [calledUrl, options] = fetchSpy.mock.calls[0];
+    expect(calledUrl).toBe("https://team-b.example.test/api/v1/sessions/s1/history");
+    expect(options.method).toBe("GET");
+    // The history endpoint now requires the same internal service JWT as
+    // query()/seedSession() (previously the only unauthenticated
+    // internal-service route on Team 4B -- fixed here).
+    expect(options.headers.Authorization).toMatch(/^Bearer ey/);
+  });
+
+  it("hasSession() reports false for a 404 (missing/expired session)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
+
+    const { realTeamB } = await import("@/services/teamB/client");
+    const exists = await realTeamB.hasSession!("expired-session", TEST_IDENTITY);
+
+    expect(exists).toBe(false);
+  });
+
+  it("hasSession() fails safe to true (skip restoration) on a network error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+    const { realTeamB } = await import("@/services/teamB/client");
+    const exists = await realTeamB.hasSession!("s1", TEST_IDENTITY);
+
+    expect(exists).toBe(true);
+  });
+
+  it("STEP 2 REMEDIATION regression guard: hasSession() also fails safe to true on a 401/403 from Team 4B (e.g. a misconfigured signing key), never crashing or misreporting 'missing'", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({ detail: "Invalid or missing authentication." }) }));
+
+    const { realTeamB } = await import("@/services/teamB/client");
+    const exists = await realTeamB.hasSession!("s1", TEST_IDENTITY);
+
+    // Only a 404 means "missing" -- any other non-ok status (including an
+    // unexpected 401/403 this client's own token should never actually
+    // trigger) is treated the same as "cannot confirm", not "confirmed
+    // missing" -- skipping restoration is always the safe direction.
+    expect(exists).toBe(true);
+  });
+
+  it("seedSession() POSTs {turns} with a real Bearer JWT to the seed endpoint", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ session_id: "s1", seeded: true, turn_count: 1 }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { realTeamB } = await import("@/services/teamB/client");
+    const result = await realTeamB.seedSession!("s1", [{ role: "user", content: "hi", timestamp: 1.0 }], TEST_IDENTITY);
+
+    expect(result).toEqual({ session_id: "s1", seeded: true, turn_count: 1 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [calledUrl, options] = fetchSpy.mock.calls[0];
+    expect(calledUrl).toBe("https://team-b.example.test/api/v1/sessions/s1/seed");
+    expect(options.headers.Authorization).toMatch(/^Bearer ey/);
+    expect(JSON.parse(options.body as string)).toEqual({ turns: [{ role: "user", content: "hi", timestamp: 1.0 }] });
+  });
+
+  it("seedSession() throws TeamBQueryError on a non-ok response, mirroring query()'s own error handling", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({}) }));
+
+    const { realTeamB } = await import("@/services/teamB/client");
+    const { TeamBQueryError } = await import("@/services/teamB/client");
+
+    await expect(realTeamB.seedSession!("s1", [], TEST_IDENTITY)).rejects.toBeInstanceOf(TeamBQueryError);
+  });
+});

@@ -1,0 +1,117 @@
+<svg width="1920" height="1080" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg">
+<rect x="0" y="0" width="1920" height="1080" fill="#f7f8fb"/>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#4b5468"/>
+</marker>
+<marker id="arrowGreen" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#12734f"/>
+</marker>
+<marker id="arrowPurple" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#5e35b4"/>
+</marker>
+<marker id="arrowBlue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#2255c4"/>
+</marker>
+</defs>
+<text x="48.0" y="50.0" font-family="'Segoe UI', Arial, sans-serif" font-size="27" font-weight="800" fill="#1b2130" text-anchor="start">EDUCOPILOT M6 — TECHNICAL DETAILS</text>
+<text x="48.0" y="72.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="400" fill="#7a8296" text-anchor="start">Endpoints and RAG configuration, Team 4A and Team 4B  ·  companion to the overview slide</text>
+<rect x="48.0" y="96.0" width="438.0" height="944.0" rx="12" fill="#f4fbf7" stroke="#a4ddc0" stroke-width="1.4"/>
+<text x="70.0" y="134.0" font-family="'Segoe UI', Arial, sans-serif" font-size="17.5" font-weight="800" fill="#12734f" text-anchor="start">TEAM 4A — ENDPOINTS</text>
+<text x="66.0" y="170.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#12734f" text-anchor="start">POST</text>
+<text x="130.0" y="170.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/v1/ingest</text>
+<text x="130.0" y="192.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Canonical. JWT-</text>
+<text x="130.0" y="209.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">protected,</text>
+<text x="130.0" y="226.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">synchronous.</text>
+<text x="66.0" y="267.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#12734f" text-anchor="start">POST</text>
+<text x="130.0" y="267.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/ingest/pdf</text>
+<text x="130.0" y="289.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Legacy. Celery-queued.</text>
+<text x="66.0" y="330.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#12734f" text-anchor="start">POST</text>
+<text x="130.0" y="330.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/ingest/video</text>
+<text x="130.0" y="352.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Legacy. Celery-queued.</text>
+<text x="66.0" y="393.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#12734f" text-anchor="start">POST</text>
+<text x="130.0" y="393.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/ingest/youtube</text>
+<text x="130.0" y="415.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Legacy. Celery-queued.</text>
+<text x="66.0" y="456.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#12734f" text-anchor="start">GET</text>
+<text x="130.0" y="456.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/jobs/{job_id}</text>
+<text x="130.0" y="478.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Job status.</text>
+<text x="66.0" y="519.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#12734f" text-anchor="start">GET</text>
+<text x="130.0" y="519.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/jobs</text>
+<text x="130.0" y="541.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Paginated job list.</text>
+<text x="66.0" y="582.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#12734f" text-anchor="start">GET</text>
+<text x="130.0" y="582.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/health, /readyz</text>
+<text x="130.0" y="604.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Liveness / readiness.</text>
+<text x="66.0" y="653.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="800" fill="#12734f" text-anchor="start">SUPPORTED SOURCE TYPES</text>
+<text x="66.0" y="677.0" font-family="Consolas, 'Courier New', monospace" font-size="11.6" font-weight="400" fill="#3a4152" text-anchor="start">application/pdf -&gt; PDFProcessor</text>
+<text x="66.0" y="697.0" font-family="Consolas, 'Courier New', monospace" font-size="11.6" font-weight="400" fill="#3a4152" text-anchor="start">video/mp4 -&gt; VideoProcessor</text>
+<text x="66.0" y="717.0" font-family="Consolas, 'Courier New', monospace" font-size="11.6" font-weight="400" fill="#3a4152" text-anchor="start">YouTube URL -&gt; caption API</text>
+<rect x="510.0" y="96.0" width="438.0" height="944.0" rx="12" fill="#f4fbf7" stroke="#a4ddc0" stroke-width="1.4"/>
+<text x="532.0" y="134.0" font-family="'Segoe UI', Arial, sans-serif" font-size="17.5" font-weight="800" fill="#12734f" text-anchor="start">TEAM 4A — INGESTION CONFIG</text>
+<text x="528.0" y="170.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">model</text>
+<text x="528.0" y="189.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">all-MiniLM-L6-v2</text>
+<text x="528.0" y="218.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">dim</text>
+<text x="528.0" y="237.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">384, L2-normalized</text>
+<text x="528.0" y="266.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">chunk_size</text>
+<text x="528.0" y="285.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">512 tokens</text>
+<text x="528.0" y="314.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">chunk_overlap</text>
+<text x="528.0" y="333.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">50 tokens</text>
+<text x="528.0" y="362.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">distance</text>
+<text x="528.0" y="381.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">cosine</text>
+<text x="528.0" y="420.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#6b7488" text-anchor="start">Canonical: identity +</text>
+<text x="528.0" y="437.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#6b7488" text-anchor="start">generation claim, then</text>
+<text x="528.0" y="454.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#6b7488" text-anchor="start">upsert to</text>
+<text x="528.0" y="471.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#6b7488" text-anchor="start">“educopilot_chunks”.</text>
+<rect x="524.0" y="510.0" width="410.0" height="108.0" rx="8" fill="#ffffff" stroke="#a4ddc0" stroke-width="1.3" stroke-dasharray="4,3"/>
+<text x="536.0" y="534.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="700" fill="#5a6272" text-anchor="start">Legacy path — unused by current</text>
+<text x="536.0" y="552.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="700" fill="#5a6272" text-anchor="start">upload flow</text>
+<text x="536.0" y="574.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.6" font-weight="400" fill="#6b7488" text-anchor="start">Celery-queued; writes to</text>
+<text x="536.0" y="590.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.6" font-weight="400" fill="#6b7488" text-anchor="start">“team4a_ingested_chunks”.</text>
+<rect x="972.0" y="96.0" width="438.0" height="944.0" rx="12" fill="#faf6ff" stroke="#d0b8f2" stroke-width="1.4"/>
+<text x="994.0" y="134.0" font-family="'Segoe UI', Arial, sans-serif" font-size="17.5" font-weight="800" fill="#5e35b4" text-anchor="start">TEAM 4B — ENDPOINTS</text>
+<text x="990.0" y="170.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#5e35b4" text-anchor="start">POST</text>
+<text x="1054.0" y="170.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/api/v1/query</text>
+<text x="1054.0" y="192.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Non-streaming. JWT +</text>
+<text x="1054.0" y="209.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">rate-limited.</text>
+<text x="990.0" y="250.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#5e35b4" text-anchor="start">POST</text>
+<text x="1054.0" y="250.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/query/stream</text>
+<text x="1054.0" y="272.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">NDJSON token stream.</text>
+<text x="990.0" y="313.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#5e35b4" text-anchor="start">GET</text>
+<text x="1054.0" y="313.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/sessions/{id}/history</text>
+<text x="1054.0" y="335.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Stored turns (Redis).</text>
+<text x="990.0" y="376.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#5e35b4" text-anchor="start">POST</text>
+<text x="1054.0" y="376.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/sessions/{id}/seed</text>
+<text x="1054.0" y="398.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Seed session history.</text>
+<text x="990.0" y="439.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#5e35b4" text-anchor="start">DELETE</text>
+<text x="1054.0" y="439.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/sessions/{id}</text>
+<text x="1054.0" y="461.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Clear session history.</text>
+<text x="990.0" y="502.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#5e35b4" text-anchor="start">POST</text>
+<text x="1054.0" y="502.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/api/v1/evaluate</text>
+<text x="1054.0" y="524.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">RAGAS batch</text>
+<text x="1054.0" y="541.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">evaluation.</text>
+<text x="990.0" y="582.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="800" fill="#5e35b4" text-anchor="start">GET</text>
+<text x="1054.0" y="582.0" font-family="Consolas, 'Courier New', monospace" font-size="14.5" font-weight="700" fill="#1b2130" text-anchor="start">/health, /metrics</text>
+<text x="1054.0" y="604.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">Component health;</text>
+<text x="1054.0" y="621.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#7a8296" text-anchor="start">counters.</text>
+<rect x="986.0" y="670.0" width="410.0" height="76.0" rx="8" fill="#ffffff" stroke="#d0b8f2" stroke-width="1.3"/>
+<text x="998.0" y="694.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="700" fill="#5e35b4" text-anchor="start">Reranker: implemented, disabled</text>
+<text x="998.0" y="712.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="700" fill="#5e35b4" text-anchor="start">by default</text>
+<text x="998.0" y="730.0" font-family="'Segoe UI', Arial, sans-serif" font-size="10.8" font-weight="400" fill="#8a92a6" text-anchor="start">(cross-encoder/mmarco-mMiniLMv2)</text>
+<rect x="1434.0" y="96.0" width="438.0" height="944.0" rx="12" fill="#faf6ff" stroke="#d0b8f2" stroke-width="1.4"/>
+<text x="1456.0" y="134.0" font-family="'Segoe UI', Arial, sans-serif" font-size="17.5" font-weight="800" fill="#5e35b4" text-anchor="start">TEAM 4B — RETRIEVAL CONFIG</text>
+<text x="1452.0" y="170.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">search_mode</text>
+<text x="1452.0" y="189.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">hybrid (semantic + BM25)</text>
+<text x="1452.0" y="216.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">fusion</text>
+<text x="1452.0" y="235.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">RRF, k=60</text>
+<text x="1452.0" y="262.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">candidate pool</text>
+<text x="1452.0" y="281.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">max(top_k, 100) / leg</text>
+<text x="1452.0" y="308.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">top_k / threshold</text>
+<text x="1452.0" y="327.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">5 / 0.30 (default)</text>
+<text x="1452.0" y="354.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">reranker</text>
+<text x="1452.0" y="373.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">disabled by default</text>
+<text x="1452.0" y="400.0" font-family="Consolas, 'Courier New', monospace" font-size="13.5" font-weight="700" fill="#3a4152" text-anchor="start">authority filter</text>
+<text x="1452.0" y="419.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#7a8296" text-anchor="start">fail-closed, pre-fusion</text>
+<text x="1452.0" y="456.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="800" fill="#5e35b4" text-anchor="start">CITATION FIELDS</text>
+<text x="1452.0" y="480.0" font-family="Consolas, 'Courier New', monospace" font-size="11.8" font-weight="400" fill="#3a4152" text-anchor="start">document_id, document_title, chunk_id</text>
+<text x="1452.0" y="500.0" font-family="Consolas, 'Courier New', monospace" font-size="11.8" font-weight="400" fill="#3a4152" text-anchor="start">page_number, section_heading (PDF)</text>
+<text x="1452.0" y="520.0" font-family="Consolas, 'Courier New', monospace" font-size="11.8" font-weight="400" fill="#3a4152" text-anchor="start">start/end timestamp (video, YouTube)</text>
+</svg>

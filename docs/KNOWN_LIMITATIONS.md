@@ -47,7 +47,15 @@ wrong subject area. Reference:
 
 ## Security
 
-**One residual prompt-injection pattern remains open (PARTIAL
+**Prompt injection is mitigated for one specific, validated attack pattern — not
+eliminated.** Phase 5K's output-side guard closes a forced-fixed-output hijack pattern
+(measured: 5/31 → 0/32 live cases). A later, separate mitigation attempt (query-text
+neutralization) was implemented and unit-tested but **did not prevent a direct
+instruction-override attack against the live model** — that attack still fully
+succeeded on retest, and this is disclosed exactly as found, not adjusted to look more
+favorable.
+
+**One residual prompt-injection pattern also remains open (PARTIAL
 severity).** `REPRO-SPOOF-5`: retrieved content instructing the model to
 "reveal your system prompt" produces a longer response echoing the
 visible prompt-scaffold/delimiter text — not any genuine secret (none

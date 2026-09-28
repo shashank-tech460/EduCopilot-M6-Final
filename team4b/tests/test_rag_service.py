@@ -24,7 +24,7 @@ from app.core.config import get_settings
 from app.models.query import RetrievalConfig, SearchMode
 from app.models.retrieval import RetrievalResult
 from app.services.conversation import ConversationStoreUnavailableError, ConversationTurn
-from app.services.llm_generator import LLMUnavailableError
+from app.services.llm_generator import GenerationResult, LLMUnavailableError
 from app.services.rag_service import RAGService, RAGServiceResult
 from app.services.vector_store import VectorStoreUnavailableError
 
@@ -111,13 +111,45 @@ class FakeConversationManager:
         self._history.setdefault(session_id, []).append(turn)
         return turn
 
+    def seed_history(self, session_id: str, turns: list[tuple[str, str, float | None]]) -> bool:
+        # Added for Step 7's seed endpoint. This general-purpose fake has
+        # no concurrent callers within a single test, so a plain
+        # check-then-write is a faithful enough stand-in for the real
+        # ConversationManager's lock-guarded version; the lock/concurrency
+        # behavior itself is tested separately, directly against the real
+        # ConversationManager (tests/test_conversation.py) and at the
+        # route level with a real ConversationManager + FakeRedisClient
+        # (tests/test_api.py's TestSeedSession).
+        if self.session_exists(session_id):
+            return False
+        for role, content, timestamp in turns:
+            self.append_turn(session_id, role, content, timestamp)
+        return True
+
 
 class FakeLLMGenerator:
-    """Records exactly what RAGService passed to `generate()`."""
+    """Records exactly what RAGService passed to `generate()`.
 
-    def __init__(self, answer: str = "a generated answer", raise_error: Exception | None = None) -> None:
+    Stage 8: `generate()` now returns a real `GenerationResult` (not a
+    bare string), matching the real `LLMGenerator.generate()`'s own
+    updated return type -- see app/services/llm_generator.py. `grounded`
+    defaults to `None` ("no explicit signal"), so every pre-existing
+    `FakeLLMGenerator(answer=...)` call site across this test suite
+    (test_api.py, test_hybrid_retriever.py, test_rag_service_properties.py)
+    is completely unaffected: `result.retrieval_metadata` simply never
+    gains a "grounded" key unless a test explicitly opts in via the new
+    `grounded=` keyword.
+    """
+
+    def __init__(
+        self,
+        answer: str = "a generated answer",
+        raise_error: Exception | None = None,
+        grounded: bool | None = None,
+    ) -> None:
         self.answer = answer
         self._raise_error = raise_error
+        self._grounded = grounded
         self.calls: list[dict[str, Any]] = []
         self.conversational_calls: list[dict[str, Any]] = []
 
@@ -126,7 +158,7 @@ class FakeLLMGenerator:
         query: str,
         retrieved_results: list[RetrievalResult],
         conversation_history: list[ConversationTurn] | None = None,
-    ) -> str:
+    ) -> GenerationResult:
         self.calls.append(
             {
                 "query": query,
@@ -136,7 +168,7 @@ class FakeLLMGenerator:
         )
         if self._raise_error is not None:
             raise self._raise_error
-        return self.answer
+        return GenerationResult(answer=self.answer, grounded=self._grounded)
 
     def generate_conversational(
         self,

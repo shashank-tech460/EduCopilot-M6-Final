@@ -16,6 +16,10 @@ interface MaterialCardProps {
   onSelect: (material: MaterialSummary) => void;
   onDelete: (material: MaterialSummary) => void;
   isDeleting: boolean;
+  /** Stage 9 — retries Team A ingestion for a `status === "failed"`
+   * material without re-uploading any bytes. */
+  onRetryIngestion: (material: MaterialSummary) => void;
+  isRetrying: boolean;
 }
 
 /**
@@ -35,8 +39,11 @@ export function MaterialCard({
   onSelect,
   onDelete,
   isDeleting,
+  onRetryIngestion,
+  isRetrying,
 }: MaterialCardProps) {
   const isReady = material.status === "ready";
+  const isFailed = material.status === "failed";
 
   return (
     <div
@@ -71,16 +78,29 @@ export function MaterialCard({
           />
         </div>
       )}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="shrink-0 opacity-70 transition-opacity group-hover:opacity-100"
-        onClick={() => onDelete(material)}
-        disabled={isDeleting}
-      >
-        <Trash2 className="h-4 w-4" />
-        {isDeleting ? "Deleting…" : "Delete"}
-      </Button>
+      <div className="flex shrink-0 items-center gap-1">
+        {isFailed ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="opacity-70 transition-opacity group-hover:opacity-100"
+            onClick={() => onRetryIngestion(material)}
+            disabled={isRetrying}
+          >
+            {isRetrying ? "Retrying…" : "Retry"}
+          </Button>
+        ) : null}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="opacity-70 transition-opacity group-hover:opacity-100"
+          onClick={() => onDelete(material)}
+          disabled={isDeleting}
+        >
+          <Trash2 className="h-4 w-4" />
+          {isDeleting ? "Deleting…" : "Delete"}
+        </Button>
+      </div>
     </div>
   );
 }

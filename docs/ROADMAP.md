@@ -19,11 +19,12 @@
   testing (a real contrast bug and, separately, a real CSS `mask-image`
   bug affecting text readability were both found and fixed this way, not
   just claimed).
-- A full automated test suite: Team4B's pytest suite (1302 passed / 3
-  skipped / 1 known, explained pre-existing failure), Team4C's Vitest
-  (469 tests), Playwright E2E (12 specs, including real ingestion →
-  retrieval → grounded-answer → citation flows against the live backend),
-  and axe-core accessibility checks.
+- A full automated test suite: Team4A's pytest suite (913 passed / 5
+  skipped), Team4B's pytest suite (1438 passed / 3 skipped / 1 known,
+  explained pre-existing failure), Team4C's Vitest (669 tests), Playwright
+  E2E (13 tests across 7 spec files, including real ingestion → retrieval → grounded-answer →
+  citation flows against the live backend), and axe-core accessibility
+  checks. Current, authoritative counts: [M6_STATUS.md](M6_STATUS.md).
 - A consolidated, maintained documentation set (this document's siblings)
   replacing a large number of temporary development-session reports.
 
@@ -59,8 +60,11 @@ because any of them is planned or committed:
   worker processes/machines against a shared Redis broker.
 - **Observability** — centralized structured-log aggregation, request
   tracing across the three services, and alerting.
-- **Rate limiting** — per-account/per-IP limits on ingestion and query
-  endpoints, currently absent.
+- **System-wide, per-IP rate limiting** — Team4B's own `/query`, `/query/stream`, and
+  `/evaluate` already have identity-keyed (not IP-keyed) rate limiting; Team4A's
+  ingestion endpoints and every other Team4B/Team4C route currently have none. A real
+  deployment would extend coverage to ingestion and add IP-level limits ahead of
+  authentication. See [SECURITY.md](SECURITY.md) for what's already in place.
 - **Additional file formats** — e.g., DOCX, PPTX, plain-text notes —
   would extend Team4A's extraction stage; not started.
 - **Richer learning tools** — e.g., auto-generated practice questions or

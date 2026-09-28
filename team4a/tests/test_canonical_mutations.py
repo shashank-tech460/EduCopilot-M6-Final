@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from app.pipeline.canonical_mutations import delete_exact_points, delete_older_generations
+from app.pipeline.canonical_mutations import RealQdrantMutationClient, delete_exact_points, delete_older_generations
 
 
 @dataclass
@@ -107,3 +107,86 @@ def test_cleanup_never_touches_another_document(client):
     delete_older_generations(client, "educopilot_chunks", "doc-A", current_generation=2)
     remaining = {p.id for p in client.points}
     assert remaining == {"b-old"}, "cleanup for doc-A must never remove doc-B's points"
+
+
+# ---------------------------------------------------------------------------
+# STEP 1 REMEDIATION -- RealQdrantMutationClient's own delete methods must
+# tolerate a "collection not found" 404 as a safe no-op (nothing published
+# yet means nothing to delete), rather than letting it propagate and crash
+# the orchestrator's self-heal cleanup path. Any OTHER error status must
+# still propagate unchanged.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRawQdrantClient:
+    """Mimics the real qdrant_client.QdrantClient's `.delete()` just
+    enough to simulate both outcomes this fix cares about."""
+
+    def __init__(self, raise_status_code: int | None = None):
+        self._raise_status_code = raise_status_code
+        self.delete_calls: list[tuple[str, object]] = []
+
+    def delete(self, collection_name, points_selector):
+        self.delete_calls.append((collection_name, points_selector))
+        if self._raise_status_code is not None:
+            from qdrant_client.http.exceptions import UnexpectedResponse
+
+            raise UnexpectedResponse(
+                status_code=self._raise_status_code,
+                reason_phrase="Not Found" if self._raise_status_code == 404 else "Error",
+                content=b'{"status":{"error":"simulated"}}',
+                headers={},
+            )
+
+
+def _mutation_client_with(fake_raw_client) -> RealQdrantMutationClient:
+    client = RealQdrantMutationClient(url="http://localhost:6333", api_key=None)
+    client._client = fake_raw_client  # bypass lazy real-client construction
+    return client
+
+
+def test_delete_points_by_id_tolerates_a_missing_collection():
+    fake_raw = _FakeRawQdrantClient(raise_status_code=404)
+    client = _mutation_client_with(fake_raw)
+
+    client.delete_points_by_id("educopilot_chunks", ["p1", "p2"])  # must not raise
+
+    assert len(fake_raw.delete_calls) == 1
+
+
+def test_delete_points_by_generation_filter_tolerates_a_missing_collection():
+    fake_raw = _FakeRawQdrantClient(raise_status_code=404)
+    client = _mutation_client_with(fake_raw)
+
+    client.delete_points_by_generation_filter("educopilot_chunks", "doc-A", less_than_generation=5)  # must not raise
+
+    assert len(fake_raw.delete_calls) == 1
+
+
+def test_delete_points_by_id_still_raises_on_a_non_404_failure():
+    fake_raw = _FakeRawQdrantClient(raise_status_code=500)
+    client = _mutation_client_with(fake_raw)
+
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    with pytest.raises(UnexpectedResponse):
+        client.delete_points_by_id("educopilot_chunks", ["p1"])
+
+
+def test_delete_points_by_generation_filter_still_raises_on_a_non_404_failure():
+    fake_raw = _FakeRawQdrantClient(raise_status_code=500)
+    client = _mutation_client_with(fake_raw)
+
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    with pytest.raises(UnexpectedResponse):
+        client.delete_points_by_generation_filter("educopilot_chunks", "doc-A", less_than_generation=5)
+
+
+def test_delete_points_by_id_succeeds_normally_when_collection_exists():
+    fake_raw = _FakeRawQdrantClient(raise_status_code=None)
+    client = _mutation_client_with(fake_raw)
+
+    client.delete_points_by_id("educopilot_chunks", ["p1"])
+
+    assert len(fake_raw.delete_calls) == 1

@@ -55,15 +55,14 @@ next-env.d.ts
 Thumbs.db
 
 # ---------------------------------------------------------------------------
-# Non-canonical backup/duplicate/disposable project-copy directories (exact
-# names only — see docs/M6_REPOSITORY_CLEANUP_AUDIT.md sections 5/6 and
-# docs/REPOSITORY_CLEANUP_REPORT.md for why these exist and why they are
-# excluded from Git rather than deleted). Kept locally for rollback/reference.
+# Non-canonical disposable project-copy directory (exact name only). Kept
+# locally, excluded from Git — see docs/m6-product-validation-isolation-
+# environment.md for why it exists. The four old team4a/team4b backup
+# snapshots that used to be listed here were deleted on 2026-09-28 (see
+# docs/DOCUMENTATION_CLEANUP_2026-09-28.md); their history is preserved in
+# docs/history/M6_REPOSITORY_CLEANUP_AUDIT.md and
+# docs/history/REPOSITORY_CLEANUP_REPORT.md.
 # ---------------------------------------------------------------------------
-/team4a-backup-before-transcript-windowing/
-/team4a-before-youtube-hindi-fallback/
-/team4a-new/
-/team4b-context-provenance-temp/
 /team4c-validation/
 
 # ---------------------------------------------------------------------------

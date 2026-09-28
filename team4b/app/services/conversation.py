@@ -150,6 +150,10 @@ class RedisClientProtocol(Protocol):
 
     def pipeline(self, transaction: bool = True) -> RedisPipelineProtocol: ...
 
+    def set(self, name: str, value: str, *, nx: bool = False, ex: int | None = None) -> Any: ...
+
+    def delete(self, *names: str) -> Any: ...
+
 
 class RealRedisClient:
     """Real redis-py integration. Constructed lazily inside
@@ -184,6 +188,12 @@ class RealRedisClient:
 
     def pipeline(self, transaction: bool = True) -> RedisPipelineProtocol:
         return self._ensure_client().pipeline(transaction=transaction)  # type: ignore[no-any-return]
+
+    def set(self, name: str, value: str, *, nx: bool = False, ex: int | None = None) -> Any:
+        return self._ensure_client().set(name, value, nx=nx, ex=ex)
+
+    def delete(self, *names: str) -> Any:
+        return self._ensure_client().delete(*names)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +318,122 @@ class ConversationManager:
             return []
         return self._read_range(session_id, start=-size, end=-1)
 
+    def seed_history(
+        self,
+        session_id: str,
+        turns: list[tuple[Literal["user", "assistant"], str, float | None]],
+    ) -> bool:
+        """Restore `session_id`'s history from an external source (Team 4C's
+        durable MongoDB store) after its Redis session has expired.
+
+        Returns `True` if this call actually wrote the seed turns, `False`
+        if it was a safe no-op (the session already existed, or a
+        concurrent seed was already in progress) -- callers should not
+        treat `False` as an error; it means restoration was unnecessary or
+        already handled elsewhere.
+
+        RELIABILITY (STEP 8 CORRECTION): an earlier version of this method
+        wrote each turn via a SEPARATE call to `append_turn()` in a plain
+        Python loop -- each call was its own independent Redis
+        round-trip/pipeline, so a failure partway through (e.g. turn 3 of
+        5) left the session PARTIALLY seeded: the Redis key now existed
+        (from turns 1-2), so `session_exists()` was permanently `True`
+        from then on, and every future retry would see the session as
+        "already existing" and silently no-op FOREVER -- a corrected-cause
+        retry could never actually complete the restoration. Fixed here by
+        writing ALL turns in a SINGLE Redis pipeline (one `RPUSH key v1 v2
+        ... vN` + one `EXPIRE`, executed once): either the entire batch is
+        applied, or (if the pipeline/execute call fails) NONE of it is --
+        the session key is never left in a half-written state. A failed
+        attempt therefore leaves `session_exists()` still `False`, so a
+        later retry (once the transient Redis issue clears) proceeds and
+        completes normally, rather than being permanently blocked by its
+        own prior partial failure. All `turns` are role-validated BEFORE
+        any write is attempted, for the same reason -- an invalid entry
+        discovered mid-write would otherwise itself produce a partial
+        write.
+
+        IDEMPOTENCY / CONCURRENCY: guarded by a short-lived Redis lock
+        (`SET session_lock:{id} NX EX 30`), so at most one concurrent
+        caller for the same `session_id` ever actually writes turns --
+        every other concurrent or repeated call sees either the lock
+        already held or (after acquiring it) `session_exists()` already
+        `True`, and no-ops instead of duplicating history. The lock
+        self-expires after 30s as a backstop if this process crashes
+        mid-seed, so a stuck lock can never permanently block future
+        restoration attempts. ACTIVE SESSIONS ARE NEVER OVERWRITTEN: the
+        `session_exists()` check (after acquiring the lock, so it observes
+        the latest state) means a session created by genuine live
+        conversation traffic -- or by a concurrent restoration that
+        finished first -- is left completely untouched.
+
+        `turns` is truncated to the most recent `Settings.conversation_window_size`
+        entries before writing -- restoring more than the window
+        `RAGService` ever actually reads would be pure waste, and this
+        keeps a restored session's effective context identical to what a
+        live, never-expired session would have used for prompting anyway.
+        """
+
+        window = self._settings.conversation_window_size
+        bounded_turns = turns[-window:] if window > 0 else []
+
+        for role, _content, _timestamp in bounded_turns:
+            if role not in _VALID_ROLES:
+                raise InvalidConversationRoleError(
+                    f"role must be one of {sorted(_VALID_ROLES)}, got {role!r}"
+                )
+
+        lock_key = f"session_lock:{session_id}"
+        try:
+            lock_acquired = bool(self._redis.set(lock_key, "1", nx=True, ex=30))
+        except Exception as exc:  # noqa: BLE001
+            raise ConversationStoreUnavailableError(
+                f"Failed to acquire restoration lock for session {session_id!r}", last_error=exc
+            ) from exc
+
+        if not lock_acquired:
+            return False
+
+        try:
+            if self.session_exists(session_id):
+                return False
+
+            if not bounded_turns:
+                # Nothing to write -- a genuinely empty history is a safe,
+                # successful no-op (there is nothing that could ever be
+                # duplicated by a later retry either).
+                return True
+
+            key = self._session_key(session_id)
+            ttl_seconds = int(self._settings.session_ttl_minutes * 60)
+            serialized_entries = [
+                json.dumps(
+                    {
+                        "role": role,
+                        "content": content,
+                        "timestamp": timestamp if timestamp is not None else self._clock(),
+                    }
+                )
+                for role, content, timestamp in bounded_turns
+            ]
+
+            try:
+                pipeline = self._redis.pipeline(transaction=True)
+                pipeline.rpush(key, *serialized_entries)
+                pipeline.expire(key, ttl_seconds)
+                pipeline.execute()
+            except Exception as exc:  # noqa: BLE001 -- any Redis client failure is reported uniformly
+                raise ConversationStoreUnavailableError(
+                    f"Failed to seed history for session {session_id!r}", last_error=exc
+                ) from exc
+
+            return True
+        finally:
+            try:
+                self._redis.delete(lock_key)
+            except Exception:  # noqa: BLE001 -- the lock's own EX is the backstop; never break restoration on cleanup failure
+                pass
+
     def session_exists(self, session_id: str) -> bool:
         """Whether `session_id` currently has a non-expired Redis key.
         A minimal, explicit primitive for "session presence" -- not a
@@ -320,6 +446,36 @@ class ConversationManager:
             raise ConversationStoreUnavailableError(
                 f"Failed to check session existence for {session_id!r}", last_error=exc
             ) from exc
+
+    def delete_session(self, session_id: str) -> bool:
+        """STEP 3 REMEDIATION: delete exactly `session_id`'s own history,
+        and nothing else.
+
+        Always safe by construction, the same reasoning already
+        established for `seed_history`'s restoration lock and Team 4A's
+        `delete_exact_points` (canonical_mutations.py): this derives a
+        single, exact Redis key from the given `session_id` via the same
+        `_session_key()` every other method on this class uses --
+        never a pattern, filter, or range -- so it can only ever remove
+        that one session's own data, regardless of how many other
+        sessions exist alongside it.
+
+        Returns `True` if a session was actually deleted, `False` if
+        `session_id` had no session to begin with (Redis's own `DEL`
+        return value -- 0 keys removed) -- a safe, ordinary no-op, not
+        an error; callers (e.g. Team 4C deleting a Conversation) should
+        treat a "nothing to delete" outcome as success, not failure.
+        """
+
+        key = self._session_key(session_id)
+        try:
+            deleted_count = self._redis.delete(key)
+        except Exception as exc:  # noqa: BLE001
+            raise ConversationStoreUnavailableError(
+                f"Failed to delete session {session_id!r}", last_error=exc
+            ) from exc
+
+        return bool(deleted_count)
 
     def _read_range(self, session_id: str, *, start: int, end: int) -> list[ConversationTurn]:
         key = self._session_key(session_id)

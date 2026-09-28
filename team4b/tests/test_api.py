@@ -29,13 +29,16 @@ from fastapi.testclient import TestClient
 from app.api.auth_dependency import get_service_jwt_verifier
 from app.api.dependencies import get_conversation_manager, get_rag_service
 from app.api.main import create_app
+from app.api.rate_limit import get_rate_limiter
+from app.core.config import Settings
 from app.models.query import QueryResponse, SourceAttribution
 from app.models.retrieval import RetrievalResult
 from app.security.service_jwt import ServiceJWTVerifier
-from app.services.conversation import ConversationStoreUnavailableError
+from app.services.conversation import ConversationManager, ConversationStoreUnavailableError
 from app.services.llm_generator import LLMUnavailableError
 from app.services.rag_service import RAGService
 from app.services.vector_store import VectorStoreUnavailableError
+from tests.fakes import FakeRateLimiter, FakeRedisClient
 from tests.test_rag_service import FakeConversationManager, FakeHybridRetriever, FakeLLMGenerator
 
 # Phase 2E: `POST /api/v1/query` now requires a valid, real ES256 internal
@@ -137,6 +140,12 @@ def _client(
         expected_audience=_TEST_AUDIENCE,
         required_scope=_TEST_SCOPE,
     )
+    # Security Hardening Stage 1: /api/v1/query and /api/v1/query/stream
+    # are now rate-limited too -- see FakeRateLimiter's own docstring for
+    # why this is overridden by default (nearly every test in this file
+    # shares the same test identity and would otherwise collide on a
+    # real rate limit within one suite run).
+    app.dependency_overrides[get_rate_limiter] = lambda: FakeRateLimiter()
     client = TestClient(app, headers={"Authorization": f"Bearer {_mint_valid_test_token()}"})
     return client, retriever, conversation, llm
 
@@ -415,6 +424,171 @@ class TestPostQueryErrorPropagation:
         assert "the real, previously-invisible bug" in caplog.text
 
 
+class TestPostQueryStream:
+    """Stage 9B's additive streaming endpoint. Reuses `_client()` exactly
+    as-is, passing a REAL `LLMGenerator` wired to `FakeLLMClient` as the
+    `llm=` argument (RAGService only ever calls it through the same
+    duck-typed interface `FakeLLMGenerator` stands in for elsewhere in
+    this file) so `generate_stream()` -- which `FakeLLMGenerator` itself
+    does not implement -- is genuinely exercised end-to-end through the
+    real route -> RAGService -> LLMGenerator chain.
+    """
+
+    def _streaming_llm(self, *, stream_fragments: list[str], raise_error: Exception | None = None):
+        from app.core.config import Settings
+        from app.services.llm_generator import LLMGenerator as _LLMGenerator
+        from tests.fakes import FakeLLMClient
+
+        client = FakeLLMClient(stream_fragments=stream_fragments, raise_error=raise_error)
+        return _LLMGenerator(settings=Settings(_env_file=None), llm_client=client)  # type: ignore[call-arg]
+
+    def _read_ndjson(self, response: Any) -> list[dict[str, Any]]:
+        import json as _json
+
+        lines = [line for line in response.text.splitlines() if line.strip()]
+        return [_json.loads(line) for line in lines]
+
+    def test_streams_ndjson_deltas_followed_by_a_done_event(self):
+        json_text = '{"answer": "This has plenty of words in the answer text.", "grounded": true}'
+        fragments = [json_text[i : i + 6] for i in range(0, len(json_text), 6)]
+        llm = self._streaming_llm(stream_fragments=fragments)
+        chunks = [_chunk("c1", "some context")]
+        client, _r, _conv, _llm = _client(retriever=FakeHybridRetriever(results=chunks), llm=llm)
+
+        response = client.post("/api/v1/query/stream", json={"query": "explain the topic"})
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/x-ndjson")
+        events = self._read_ndjson(response)
+        assert events[-1]["type"] == "done"
+        assert events[-1]["answer"] == "This has plenty of words in the answer text."
+        delta_events = [e for e in events if e["type"] == "delta"]
+        assert len(delta_events) > 1  # genuinely delivered as multiple pieces
+        assert "".join(e["text"] for e in delta_events) == events[-1]["answer"]
+
+    def test_done_event_matches_the_same_query_response_schema_as_the_non_streaming_route(self):
+        json_text = '{"answer": "grounded answer with enough words here.", "grounded": true}'
+        llm = self._streaming_llm(stream_fragments=[json_text])
+        chunks = [_chunk("c1", "some context")]
+        client, _r, _conv, _llm = _client(retriever=FakeHybridRetriever(results=chunks), llm=llm)
+
+        response = client.post("/api/v1/query/stream", json={"query": "explain the topic"})
+
+        done_event = self._read_ndjson(response)[-1]
+        payload = {k: v for k, v in done_event.items() if k != "type"}
+        QueryResponse.model_validate(payload)
+        assert set(payload.keys()) == {"answer", "session_id", "source_attributions", "retrieval_metadata"}
+
+    def test_citations_are_present_in_the_done_event(self):
+        json_text = '{"answer": "grounded answer with enough words here.", "grounded": true}'
+        llm = self._streaming_llm(stream_fragments=[json_text])
+        chunks = [_chunk("c1", "alpha", document_id="job-1"), _chunk("c2", "beta", document_id="job-2")]
+        client, _r, _conv, _llm = _client(retriever=FakeHybridRetriever(results=chunks), llm=llm)
+
+        response = client.post("/api/v1/query/stream", json={"query": "explain the topic"})
+
+        done_event = self._read_ndjson(response)[-1]
+        assert len(done_event["source_attributions"]) == 2
+
+    def test_zero_retrieval_suppresses_citations_and_still_streams_a_done_event(self):
+        """Stage 7's zero-retrieval citation suppression, still honored
+        over the streaming path."""
+
+        llm = self._streaming_llm(stream_fragments=["irrelevant -- never reached"])
+        client, _r, _conv, _llm = _client(retriever=FakeHybridRetriever(results=[]), llm=llm)
+
+        response = client.post("/api/v1/query/stream", json={"query": "explain the topic"})
+
+        done_event = self._read_ndjson(response)[-1]
+        assert done_event["source_attributions"] == []
+        assert done_event["answer"] == "I don't have enough information in the provided context to answer this question reliably."
+
+    def test_retrieval_failure_returns_503_not_a_stream(self):
+        retriever = FakeHybridRetriever(raise_error=VectorStoreUnavailableError("qdrant down"))
+        client, _r, _conv, _llm = _client(retriever=retriever)
+
+        response = client.post("/api/v1/query/stream", json={"query": "q"})
+
+        assert response.status_code == 503
+        assert "detail" in response.json()
+
+    def test_conversation_store_failure_returns_503_not_a_stream(self):
+        conversation = FakeConversationManager(raise_on_append=ConversationStoreUnavailableError("redis down"))
+        client, _r, _conv, _llm = _client(conversation=conversation)
+
+        response = client.post("/api/v1/query/stream", json={"query": "q"})
+
+        assert response.status_code == 503
+
+    def test_ollama_unreachable_before_any_token_returns_503_not_a_stream(self):
+        """The priming mechanism: a failure on the very FIRST generated
+        event (before any fragment is ever yielded) still surfaces as a
+        real HTTP 503, not an in-band NDJSON error line."""
+
+        llm = self._streaming_llm(stream_fragments=[], raise_error=ConnectionError("ollama unreachable"))
+        chunks = [_chunk("c1", "some context")]
+        client, _r, _conv, _llm = _client(retriever=FakeHybridRetriever(results=chunks), llm=llm)
+
+        response = client.post("/api/v1/query/stream", json={"query": "q"})
+
+        assert response.status_code == 503
+        assert "detail" in response.json()
+
+    def test_a_mid_stream_ollama_failure_yields_an_in_band_error_event_with_http_200_already_sent(self):
+        """The disclosed trade-off: once streaming has begun, a failure
+        can no longer change the already-committed HTTP status -- it
+        must be reported in-band instead."""
+
+        from tests.fakes import FakeLLMClient
+
+        from app.core.config import Settings
+        from app.services.llm_generator import LLMGenerator as _LLMGenerator
+
+        # The first fragment alone already carries more than six answer
+        # words, so it is flushed as a real `StreamDelta` on the very
+        # first pull (the route's priming call) -- committing the HTTP
+        # response to 200 -- before the SECOND pull raises.
+        fake_client = FakeLLMClient(
+            stream_fragments=['{"answer": "one two three four five six seven eight nine ten', "-more-text"],
+            stream_raise_after=1,
+        )
+        llm = _LLMGenerator(settings=Settings(_env_file=None), llm_client=fake_client)  # type: ignore[call-arg]
+        chunks = [_chunk("c1", "some context")]
+        client, _r, _conv, _llm = _client(retriever=FakeHybridRetriever(results=chunks), llm=llm)
+
+        response = client.post("/api/v1/query/stream", json={"query": "q"})
+
+        assert response.status_code == 200  # already committed before the mid-stream failure
+        events = self._read_ndjson(response)
+        assert events[-1]["type"] == "error"
+        assert not any(e["type"] == "done" for e in events)
+
+    def test_mid_stream_failure_does_not_persist_an_assistant_turn(self):
+        from tests.fakes import FakeLLMClient
+
+        from app.core.config import Settings
+        from app.services.llm_generator import LLMGenerator as _LLMGenerator
+
+        fake_client = FakeLLMClient(stream_fragments=['{"answer": "partial'], stream_raise_after=0)
+        llm = _LLMGenerator(settings=Settings(_env_file=None), llm_client=fake_client)  # type: ignore[call-arg]
+        chunks = [_chunk("c1", "some context")]
+        conversation = FakeConversationManager()
+        client, _r, _conv, _llm = _client(retriever=FakeHybridRetriever(results=chunks), conversation=conversation, llm=llm)
+
+        client.post("/api/v1/query/stream", json={"query": "q"})
+
+        roles = [role for (_sid, role, _content) in conversation.append_calls]
+        assert "assistant" not in roles
+
+    def test_the_non_streaming_route_is_unaffected_by_the_new_streaming_route_existing(self):
+        client, _r, _conv, _llm = _client()
+
+        response = client.post("/api/v1/query", json={"query": "What is RAG?"})
+
+        assert response.status_code == 200
+        QueryResponse.model_validate(response.json())
+
+
 class TestPostQueryNoDirectBackendAccess:
     def test_routes_module_does_not_import_backend_client_libraries(self):
         import inspect
@@ -562,6 +736,98 @@ class TestGetHistorySessionBehavior:
         assert [t["content"] for t in response_b.json()["history"]] == ["b's turn"]
 
 
+# ---------------------------------------------------------------------------
+# STEP 2 REMEDIATION -- GET /api/v1/sessions/{id}/history authentication.
+# Previously the ONLY internal-service route with no auth at all; now
+# gated by the exact same require_query_identity dependency as /query and
+# /seed. Mirrors TestQueryAuthentication's own cases one-for-one.
+# ---------------------------------------------------------------------------
+
+
+class TestSessionHistoryAuthentication:
+    def test_missing_authorization_header_rejected(self):
+        client, *_ = _client()
+        response = client.get("/api/v1/sessions/s1/history", headers={"Authorization": ""})
+        assert response.status_code == 401
+
+    def test_valid_token_accepted(self):
+        client, *_ = _client()
+        response = client.get("/api/v1/sessions/never-created/history")
+        # 404 (session genuinely doesn't exist) -- NOT 401 -- proves the
+        # request passed authentication and reached the route's own logic.
+        assert response.status_code == 404
+
+    def test_invalid_signature_rejected(self):
+        client, *_ = _client()
+        other_private_pem, _ = _generate_es256_keypair()
+        bad_token = jwt.encode(
+            {
+                "sub": "u",
+                "workspace_id": "w",
+                "scope": _TEST_SCOPE,
+                "iss": _TEST_ISSUER,
+                "aud": _TEST_AUDIENCE,
+                "iat": 0,
+                "exp": 9999999999,
+                "jti": "j",
+            },
+            other_private_pem,
+            algorithm="ES256",
+            headers={"kid": _TEST_KID},
+        )
+        response = client.get("/api/v1/sessions/s1/history", headers={"Authorization": f"Bearer {bad_token}"})
+        assert response.status_code == 401
+
+    def test_expired_token_rejected(self):
+        client, *_ = _client()
+        token = _mint_valid_test_token(exp=1)
+        response = client.get("/api/v1/sessions/s1/history", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 401
+
+    def test_wrong_issuer_rejected(self):
+        client, *_ = _client()
+        token = _mint_valid_test_token(iss="https://not-educopilot.example")
+        response = client.get("/api/v1/sessions/s1/history", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 401
+
+    def test_wrong_audience_rejected(self):
+        client, *_ = _client()
+        token = _mint_valid_test_token(aud="team4a-ingestion")
+        response = client.get("/api/v1/sessions/s1/history", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 401
+
+    def test_wrong_scope_rejected_with_403_not_401(self):
+        client, *_ = _client()
+        token = _mint_valid_test_token(scope="ingest")
+        response = client.get("/api/v1/sessions/s1/history", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 403
+
+    def test_auth_failure_does_not_leak_verification_details(self):
+        client, *_ = _client()
+        token = _mint_valid_test_token(scope="wrong-scope-value")
+        response = client.get("/api/v1/sessions/s1/history", headers={"Authorization": f"Bearer {token}"})
+        body_text = response.text.lower()
+        assert "wrong-scope-value" not in body_text
+        assert "-----begin" not in body_text
+
+    def test_401_response_does_not_leak_conversation_content(self):
+        """The exact regression this fix closes: an unauthenticated
+        caller must never see session content, even for a session that
+        genuinely exists with real history."""
+
+        from app.services.conversation import ConversationTurn
+
+        conversation = FakeConversationManager(
+            initial_history={"real-session": [ConversationTurn(role="user", content="sensitive question", timestamp=1.0)]}  # type: ignore[arg-type]
+        )
+        client, _r, _conv, _llm = _client(conversation=conversation)
+
+        response = client.get("/api/v1/sessions/real-session/history", headers={"Authorization": ""})
+
+        assert response.status_code == 401
+        assert "sensitive question" not in response.text
+
+
 class TestGetHistoryNoDirectBackendAccess:
     def test_routes_module_has_no_module_level_client_instantiation(self):
         import inspect
@@ -614,17 +880,21 @@ class TestOpenAPI:
         assert "/api/v1/evaluate/results" not in paths  # no speculative evaluation-history endpoint
         assert "/docker" not in paths
 
-    def test_only_the_five_official_task_8_1_9_1_10_1_paths_exist(self):
-        # UPDATED IN TASK 10.1: was three paths (8.1 + 9.1); now five,
-        # with /health and /metrics added by Task 10.1. Still proves no
-        # unrelated/speculative endpoint exists.
+    def test_only_the_eight_official_task_8_1_9_1_10_1_step_7_step_3_stage_9b_paths_exist(self):
+        # UPDATED IN STAGE 9B: was seven paths (8.1 + 9.1 + 10.1 + Step 7 +
+        # Step 3); now eight, with the additive streaming query endpoint
+        # (/api/v1/query/stream) added -- /api/v1/query itself is
+        # unchanged. Still proves no unrelated/speculative endpoint exists.
         client, _retriever, _conv, _llm = _client()
 
         openapi = client.get("/openapi.json").json()
 
         assert set(openapi["paths"].keys()) == {
             "/api/v1/query",
+            "/api/v1/query/stream",
             "/api/v1/sessions/{session_id}/history",
+            "/api/v1/sessions/{session_id}/seed",
+            "/api/v1/sessions/{session_id}",
             "/api/v1/evaluate",
             "/health",
             "/metrics",
@@ -647,6 +917,7 @@ def _evaluate_client(
     store: Any = None,
 ) -> tuple[TestClient, Any, Any]:
     from app.api.dependencies import get_evaluation_pipeline
+    from app.api.rate_limit import get_rate_limiter
     from app.services.evaluation import EvaluationPipeline, InMemoryEvaluationStore
     from tests.fakes import FakeRagasEvaluator
 
@@ -656,7 +927,21 @@ def _evaluate_client(
 
     app = create_app()
     app.dependency_overrides[get_evaluation_pipeline] = lambda: pipeline
-    return TestClient(app), evaluator, store
+    # Security Hardening Stage 1: /api/v1/evaluate now requires the same
+    # internal service JWT as /api/v1/query, plus a rate limit -- see
+    # this file's module-level comment (near `_client()`) for the real
+    # verifier/token pattern, and `FakeRateLimiter`'s own docstring for
+    # why the rate limiter is overridden by default in every test here
+    # that isn't specifically testing rate-limiting.
+    app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+        public_keys_by_kid={_TEST_KID: _TEST_PUBLIC_PEM},
+        expected_issuer=_TEST_ISSUER,
+        expected_audience=_TEST_AUDIENCE,
+        required_scope=_TEST_SCOPE,
+    )
+    app.dependency_overrides[get_rate_limiter] = lambda: FakeRateLimiter()
+    client = TestClient(app, headers={"Authorization": f"Bearer {_mint_valid_test_token()}"})
+    return client, evaluator, store
 
 
 class TestPostEvaluateSuccess:
@@ -1370,7 +1655,10 @@ class TestOpenAPIIncludesHealthAndMetrics:
 
         assert set(openapi["paths"].keys()) == {
             "/api/v1/query",
+            "/api/v1/query/stream",
             "/api/v1/sessions/{session_id}/history",
+            "/api/v1/sessions/{session_id}/seed",
+            "/api/v1/sessions/{session_id}",
             "/api/v1/evaluate",
             "/health",
             "/metrics",
@@ -1645,3 +1933,538 @@ class TestM6FollowUpContextAtTheRoute:
         assert response.status_code == 200
         assert len(response.json()["source_attributions"]) == 1
         assert retriever.calls[0]["query"] == "What is an operating system?"
+
+
+# ---------------------------------------------------------------------------
+# Step 7 — POST /api/v1/sessions/{session_id}/seed
+# ---------------------------------------------------------------------------
+
+
+def _seed_client() -> tuple[TestClient, ConversationManager, FakeRedisClient]:
+    """A dedicated client wired to a REAL `ConversationManager` (not
+    `FakeConversationManager`) over a `FakeRedisClient` -- unlike the rest
+    of this file's tests, the seed endpoint's actual correctness
+    (idempotency, the restoration lock, ordering) lives inside
+    `ConversationManager.seed_history()` itself, so these tests must
+    exercise the real implementation, not a simplified fake, through the
+    real HTTP route.
+    """
+
+    app = create_app()
+    redis_client = FakeRedisClient()
+    manager = ConversationManager(settings=Settings(_env_file=None), redis_client=redis_client)  # type: ignore[call-arg]
+    app.dependency_overrides[get_conversation_manager] = lambda: manager
+    app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+        public_keys_by_kid={_TEST_KID: _TEST_PUBLIC_PEM},
+        expected_issuer=_TEST_ISSUER,
+        expected_audience=_TEST_AUDIENCE,
+        required_scope=_TEST_SCOPE,
+    )
+    client = TestClient(app, headers={"Authorization": f"Bearer {_mint_valid_test_token()}"})
+    return client, manager, redis_client
+
+
+class TestSeedSessionAuthentication:
+    def test_missing_authorization_header_rejected(self):
+        client, *_ = _seed_client()
+        response = client.post(
+            "/api/v1/sessions/s1/seed", json={"turns": []}, headers={"Authorization": ""}
+        )
+        assert response.status_code == 401
+
+    def test_wrong_scope_rejected_with_403(self):
+        client, *_ = _seed_client()
+        token = _mint_valid_test_token(scope="ingest")
+        response = client.post(
+            "/api/v1/sessions/s1/seed", json={"turns": []}, headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 403
+
+    def test_valid_token_accepted(self):
+        client, *_ = _seed_client()
+        response = client.post("/api/v1/sessions/s1/seed", json={"turns": []})
+        assert response.status_code == 200
+
+
+class TestSeedSessionRestoration:
+    def test_restores_an_expired_missing_session_from_supplied_turns(self):
+        client, manager, _redis = _seed_client()
+
+        response = client.post(
+            "/api/v1/sessions/s1/seed",
+            json={
+                "turns": [
+                    {"role": "user", "content": "first", "timestamp": 1.0},
+                    {"role": "assistant", "content": "second", "timestamp": 2.0},
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {"session_id": "s1", "seeded": True, "turn_count": 2}
+        history = manager.get_history("s1")
+        assert [t.content for t in history] == ["first", "second"]  # chronological order preserved
+
+    def test_a_subsequent_query_in_the_restored_session_uses_the_restored_context(self):
+        """Requirement: 'verify the follow-up query uses restored
+        context.' Proven through the REAL, unmodified retrieval/prompting
+        path: RAGService.handle_query() reads windowed history from
+        ConversationManager BEFORE appending the new turn -- so if
+        seed_history() didn't actually write into the same store
+        get_windowed_history() reads from, this would see an empty
+        history instead.
+        """
+
+        client, manager, _redis = _seed_client()
+        client.post(
+            "/api/v1/sessions/session-x/seed",
+            json={"turns": [{"role": "user", "content": "earlier question", "timestamp": 1.0}]},
+        )
+
+        windowed = manager.get_windowed_history("session-x")
+
+        assert len(windowed) == 1
+        assert windowed[0].content == "earlier question"
+
+    def test_does_not_duplicate_turns_when_the_session_already_exists(self):
+        client, manager, _redis = _seed_client()
+        manager.append_turn("s1", "user", "live turn")
+
+        response = client.post(
+            "/api/v1/sessions/s1/seed",
+            json={"turns": [{"role": "user", "content": "should not appear"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["seeded"] is False
+        assert [t.content for t in manager.get_history("s1")] == ["live turn"]
+
+    def test_repeated_restoration_requests_are_idempotent(self):
+        client, manager, _redis = _seed_client()
+        payload = {"turns": [{"role": "user", "content": "first"}, {"role": "assistant", "content": "second"}]}
+
+        first = client.post("/api/v1/sessions/s1/seed", json=payload)
+        second = client.post("/api/v1/sessions/s1/seed", json=payload)
+
+        assert first.json()["seeded"] is True
+        assert second.json()["seeded"] is False
+        assert len(manager.get_history("s1")) == 2  # never duplicated to 4
+
+    def test_concurrent_restoration_requests_for_the_same_session_only_seed_once(self):
+        client, manager, redis_client = _seed_client()
+        # Simulates a second, concurrent restoration request already
+        # holding the lock when this one arrives.
+        redis_client.set("session_lock:s1", "1", nx=True, ex=30)
+
+        response = client.post(
+            "/api/v1/sessions/s1/seed",
+            json={"turns": [{"role": "user", "content": "late arrival"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["seeded"] is False
+        assert manager.get_history("s1") == []
+
+    def test_missing_and_empty_history_is_handled_without_error(self):
+        client, *_ = _seed_client()
+
+        response = client.post("/api/v1/sessions/never-had-any-history/seed", json={"turns": []})
+
+        assert response.status_code == 200
+        assert response.json() == {"session_id": "never-had-any-history", "seeded": True, "turn_count": 0}
+
+    def test_malformed_turn_shape_is_rejected_with_422_not_silently_accepted(self):
+        client, *_ = _seed_client()
+
+        response = client.post(
+            "/api/v1/sessions/s1/seed",
+            json={"turns": [{"role": "user"}]},  # missing required `content`
+        )
+
+        assert response.status_code == 422
+
+    def test_invalid_role_in_a_supplied_turn_is_rejected(self):
+        client, *_ = _seed_client()
+
+        response = client.post(
+            "/api/v1/sessions/s1/seed",
+            json={"turns": [{"role": "system", "content": "not allowed"}]},
+        )
+
+        assert response.status_code == 422
+
+    def test_cross_session_isolation_seeding_one_session_never_leaks_into_another(self):
+        client, manager, _redis = _seed_client()
+        manager.append_turn("session-a", "user", "a's live turn")
+
+        client.post(
+            "/api/v1/sessions/session-b/seed",
+            json={"turns": [{"role": "user", "content": "b's restored turn"}]},
+        )
+
+        assert [t.content for t in manager.get_history("session-a")] == ["a's live turn"]
+        assert [t.content for t in manager.get_history("session-b")] == ["b's restored turn"]
+
+    def test_a_normal_never_expired_session_is_unaffected_by_a_seed_attempt(self):
+        client, manager, _redis = _seed_client()
+        manager.append_turn("s1", "user", "q1")
+        manager.append_turn("s1", "assistant", "a1")
+
+        client.post("/api/v1/sessions/s1/seed", json={"turns": [{"role": "user", "content": "stale restore"}]})
+
+        assert [t.content for t in manager.get_history("s1")] == ["q1", "a1"]
+
+    def test_conversation_store_unavailable_maps_to_503(self):
+        app = create_app()
+        redis_client = FakeRedisClient(fail_times={"set": 100})
+        manager = ConversationManager(settings=Settings(_env_file=None), redis_client=redis_client)  # type: ignore[call-arg]
+        app.dependency_overrides[get_conversation_manager] = lambda: manager
+        app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+            public_keys_by_kid={_TEST_KID: _TEST_PUBLIC_PEM},
+            expected_issuer=_TEST_ISSUER,
+            expected_audience=_TEST_AUDIENCE,
+            required_scope=_TEST_SCOPE,
+        )
+        client = TestClient(app, headers={"Authorization": f"Bearer {_mint_valid_test_token()}"})
+
+        response = client.post("/api/v1/sessions/s1/seed", json={"turns": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Step 3 remediation — DELETE /api/v1/sessions/{session_id}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSessionAuthentication:
+    def test_missing_authorization_header_rejected(self):
+        client, *_ = _seed_client()
+        response = client.delete("/api/v1/sessions/s1", headers={"Authorization": ""})
+        assert response.status_code == 401
+
+    def test_wrong_scope_rejected_with_403(self):
+        client, *_ = _seed_client()
+        token = _mint_valid_test_token(scope="ingest")
+        response = client.delete("/api/v1/sessions/s1", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 403
+
+    def test_valid_token_accepted(self):
+        client, *_ = _seed_client()
+        response = client.delete("/api/v1/sessions/s1")
+        assert response.status_code == 200
+
+    def test_401_response_does_not_leak_conversation_content(self):
+        client, manager, _redis = _seed_client()
+        manager.append_turn("real-session", "user", "sensitive question")
+
+        response = client.delete("/api/v1/sessions/real-session", headers={"Authorization": ""})
+
+        assert response.status_code == 401
+        assert "sensitive question" not in response.text
+        # And, since the request was correctly rejected before reaching
+        # the route at all, the session must still exist afterward.
+        assert manager.session_exists("real-session") is True
+
+
+class TestDeleteSessionBehavior:
+    def test_deletes_an_existing_session(self):
+        client, manager, _redis = _seed_client()
+        manager.append_turn("s1", "user", "hi")
+
+        response = client.delete("/api/v1/sessions/s1")
+
+        assert response.status_code == 200
+        assert response.json() == {"session_id": "s1", "deleted": True}
+        assert manager.session_exists("s1") is False
+
+    def test_deleting_a_nonexistent_session_returns_200_not_404(self):
+        client, manager, _redis = _seed_client()
+
+        response = client.delete("/api/v1/sessions/never-existed")
+
+        assert response.status_code == 200
+        assert response.json() == {"session_id": "never-existed", "deleted": False}
+
+    def test_deleted_session_cannot_be_restored_through_the_history_endpoint(self):
+        """Direct regression guard for 'a deleted conversation cannot be
+        restored through normal APIs': once deleted, the same session_id
+        must 404 on GET history exactly like it never existed."""
+
+        client, manager, _redis = _seed_client()
+        manager.append_turn("s1", "user", "hi")
+
+        client.delete("/api/v1/sessions/s1")
+        response = client.get("/api/v1/sessions/s1/history")
+
+        assert response.status_code == 404
+
+    def test_deleted_session_cannot_be_used_for_a_follow_up_query_with_stale_context(self):
+        """The other half of 'cannot continue using stale context': a
+        /query call against a deleted session_id starts with genuinely
+        empty history -- not the pre-deletion turns -- exactly as if the
+        session_id were brand new (which, from Redis's perspective, it
+        now is)."""
+
+        client, manager, _redis = _seed_client()
+        manager.append_turn("s1", "user", "the old question")
+        manager.append_turn("s1", "assistant", "the old answer")
+
+        client.delete("/api/v1/sessions/s1")
+
+        assert manager.get_windowed_history("s1") == []
+
+    def test_exact_key_deletion_isolation_between_two_sessions(self):
+        client, manager, _redis = _seed_client()
+        manager.append_turn("session-a", "user", "a's message")
+        manager.append_turn("session-b", "user", "b's message")
+
+        response = client.delete("/api/v1/sessions/session-a")
+
+        assert response.status_code == 200
+        assert manager.session_exists("session-a") is False
+        assert manager.session_exists("session-b") is True
+        assert [t.content for t in manager.get_history("session-b")] == ["b's message"]
+
+    def test_repeated_deletion_is_idempotent_not_an_error(self):
+        client, manager, _redis = _seed_client()
+        manager.append_turn("s1", "user", "hi")
+
+        first = client.delete("/api/v1/sessions/s1")
+        second = client.delete("/api/v1/sessions/s1")
+
+        assert first.status_code == 200
+        assert first.json()["deleted"] is True
+        assert second.status_code == 200
+        assert second.json()["deleted"] is False
+
+    def test_conversation_store_unavailable_maps_to_503(self):
+        app = create_app()
+        redis_client = FakeRedisClient(fail_times={"delete": 100})
+        manager = ConversationManager(settings=Settings(_env_file=None), redis_client=redis_client)  # type: ignore[call-arg]
+        manager.append_turn("s1", "user", "hi")
+        app.dependency_overrides[get_conversation_manager] = lambda: manager
+        app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+            public_keys_by_kid={_TEST_KID: _TEST_PUBLIC_PEM},
+            expected_issuer=_TEST_ISSUER,
+            expected_audience=_TEST_AUDIENCE,
+            required_scope=_TEST_SCOPE,
+        )
+        client = TestClient(app, headers={"Authorization": f"Bearer {_mint_valid_test_token()}"})
+
+        response = client.delete("/api/v1/sessions/s1")
+
+        assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Security Hardening Stage 1
+# ---------------------------------------------------------------------------
+
+
+class TestPostEvaluateAuthentication:
+    """POST /api/v1/evaluate previously had NO authentication dependency
+    at all -- the one route in this file in that state. Mirrors
+    TestQueryAuthentication's own structure exactly, since both now use
+    the identical `require_query_identity` (composed with a rate limit,
+    see `rate_limited_query_identity`)."""
+
+    def _body(self) -> list[dict]:
+        return [{"query": "What is RAG?", "response": "RAG stands for...", "contexts": ["context text"]}]
+
+    def test_missing_authorization_header_rejected(self):
+        client, *_ = _evaluate_client()
+        response = client.post("/api/v1/evaluate", json=self._body(), headers={"Authorization": ""})
+        assert response.status_code == 401
+
+    def test_valid_token_accepted(self):
+        client, *_ = _evaluate_client()
+        response = client.post("/api/v1/evaluate", json=self._body())
+        assert response.status_code == 200
+
+    def test_invalid_signature_rejected(self):
+        client, *_ = _evaluate_client()
+        other_private_pem, _ = _generate_es256_keypair()
+        bad_token = jwt.encode(
+            {
+                "sub": "u",
+                "workspace_id": "w",
+                "scope": _TEST_SCOPE,
+                "iss": _TEST_ISSUER,
+                "aud": _TEST_AUDIENCE,
+                "iat": 0,
+                "exp": 9999999999,
+                "jti": "j",
+            },
+            other_private_pem,
+            algorithm="ES256",
+            headers={"kid": _TEST_KID},
+        )
+        response = client.post(
+            "/api/v1/evaluate", json=self._body(), headers={"Authorization": f"Bearer {bad_token}"}
+        )
+        assert response.status_code == 401
+
+    def test_expired_token_rejected(self):
+        client, *_ = _evaluate_client()
+        token = _mint_valid_test_token(exp=1)
+        response = client.post("/api/v1/evaluate", json=self._body(), headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 401
+
+    def test_wrong_scope_rejected(self):
+        client, *_ = _evaluate_client()
+        token = _mint_valid_test_token(scope="ingest")
+        response = client.post("/api/v1/evaluate", json=self._body(), headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 403
+
+    def test_unauthenticated_request_never_reaches_the_evaluator(self):
+        client, evaluator, _store = _evaluate_client()
+        client.post("/api/v1/evaluate", json=self._body(), headers={"Authorization": ""})
+        assert evaluator.calls == []
+
+
+class TestQueryLengthLimits:
+    """`QueryRequest.query` previously had no length bound at all."""
+
+    def test_a_query_at_the_maximum_length_is_accepted(self):
+        client, *_ = _client()
+        response = client.post("/api/v1/query", json={"query": "a" * 4000})
+        assert response.status_code == 200
+
+    def test_a_query_over_the_maximum_length_is_rejected(self):
+        client, retriever, _conv, _llm = _client()
+        response = client.post("/api/v1/query", json={"query": "a" * 4001})
+        assert response.status_code == 422
+        assert retriever.calls == []  # never reached retrieval
+
+    def test_an_empty_query_is_rejected(self):
+        client, *_ = _client()
+        response = client.post("/api/v1/query", json={"query": ""})
+        assert response.status_code == 422
+
+
+class TestEvaluateLengthLimits:
+    """`EvaluationItem`'s three fields previously had no length bound at
+    all -- an unauthenticated (now separately fixed) or authenticated
+    caller could submit an arbitrarily large payload straight into a
+    real RAGAS/LLM/embedding call."""
+
+    def test_an_oversized_query_field_is_rejected(self):
+        client, *_ = _evaluate_client()
+        response = client.post(
+            "/api/v1/evaluate",
+            json=[{"query": "a" * 4001, "response": "r", "contexts": ["c"]}],
+        )
+        assert response.status_code == 422
+
+    def test_an_oversized_response_field_is_rejected(self):
+        client, *_ = _evaluate_client()
+        response = client.post(
+            "/api/v1/evaluate",
+            json=[{"query": "q", "response": "a" * 20_001, "contexts": ["c"]}],
+        )
+        assert response.status_code == 422
+
+    def test_an_oversized_context_string_is_rejected(self):
+        client, *_ = _evaluate_client()
+        response = client.post(
+            "/api/v1/evaluate",
+            json=[{"query": "q", "response": "r", "contexts": ["a" * 20_001]}],
+        )
+        assert response.status_code == 422
+
+    def test_too_many_context_entries_is_rejected(self):
+        client, *_ = _evaluate_client()
+        response = client.post(
+            "/api/v1/evaluate",
+            json=[{"query": "q", "response": "r", "contexts": ["c"] * 51}],
+        )
+        assert response.status_code == 422
+
+    def test_at_the_boundary_values_are_accepted(self):
+        client, *_ = _evaluate_client()
+        response = client.post(
+            "/api/v1/evaluate",
+            json=[{"query": "a" * 4000, "response": "a" * 20_000, "contexts": ["a" * 20_000] * 50}],
+        )
+        assert response.status_code == 200
+
+
+class TestRateLimiting:
+    """Security Hardening Stage 1 -- `POST /api/v1/query`,
+    `POST /api/v1/query/stream`, and `POST /api/v1/evaluate` are now
+    rate-limited per authenticated identity (app/api/rate_limit.py).
+    `_client()`/`_evaluate_client()` override the limiter with a
+    permissive `FakeRateLimiter` by DEFAULT (see that fake's own
+    docstring) -- these tests explicitly re-override it with a
+    tight `raise_after` to exercise the 429 path deterministically,
+    without waiting on a real time window."""
+
+    def test_query_returns_429_once_the_limit_is_exceeded(self):
+        from app.api.rate_limit import get_rate_limiter
+        from tests.fakes import FakeRateLimiter
+
+        client, retriever, _conv, _llm = _client()
+        # Constructed ONCE, outside the lambda -- otherwise FastAPI would
+        # resolve a BRAND NEW FakeRateLimiter (with its own empty
+        # `.calls`) on every single request, and `raise_after` could
+        # never actually accumulate across requests. Same bug class this
+        # file's own `_client()` already documents for MetricsCollector.
+        limiter = FakeRateLimiter(raise_after=1)
+        client.app.dependency_overrides[get_rate_limiter] = lambda: limiter
+
+        first = client.post("/api/v1/query", json={"query": "first question"})
+        second = client.post("/api/v1/query", json={"query": "second question"})
+
+        assert first.status_code == 200
+        assert second.status_code == 429
+        assert "Retry-After" in second.headers
+        # The rate-limited request never reached retrieval/generation.
+        assert len(retriever.calls) == 1
+
+    def test_evaluate_returns_429_once_the_limit_is_exceeded(self):
+        from app.api.rate_limit import get_rate_limiter
+        from tests.fakes import FakeRateLimiter
+
+        client, evaluator, _store = _evaluate_client()
+        limiter = FakeRateLimiter(raise_after=1)
+        client.app.dependency_overrides[get_rate_limiter] = lambda: limiter
+        body = [{"query": "q", "response": "r", "contexts": ["c"]}]
+
+        first = client.post("/api/v1/evaluate", json=body)
+        second = client.post("/api/v1/evaluate", json=body)
+
+        assert first.status_code == 200
+        assert second.status_code == 429
+        assert len(evaluator.calls) == 1
+
+    def test_rate_limit_error_does_not_leak_internal_details(self):
+        from app.api.rate_limit import get_rate_limiter
+        from tests.fakes import FakeRateLimiter
+
+        client, *_ = _client()
+        client.app.dependency_overrides[get_rate_limiter] = lambda: FakeRateLimiter(raise_after=0)
+
+        response = client.post("/api/v1/query", json={"query": "explain the concept"})
+
+        assert response.status_code == 429
+        assert "redis" not in response.text.lower()
+        assert "Traceback" not in response.text
+
+
+class TestCORSConfiguration:
+    """Security Hardening Stage 1 -- this is a purely internal,
+    service-to-service API with no legitimate browser caller (see
+    Settings.cors_allowed_origins' own docstring); the default,
+    unconfigured posture must never emit a permissive
+    Access-Control-Allow-Origin header."""
+
+    def test_no_access_control_headers_are_emitted_for_a_cross_origin_request_by_default(self):
+        client, *_ = _client()
+        response = client.post(
+            "/api/v1/query",
+            json={"query": "explain the concept"},
+            headers={"Origin": "https://an-arbitrary-origin.example"},
+        )
+        assert "access-control-allow-origin" not in {k.lower() for k in response.headers.keys()}

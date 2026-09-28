@@ -70,7 +70,17 @@ from hypothesis import strategies as st
 from app.api.job_store import InMemoryJobStore
 from app.models.schemas import IngestionJob, JobStatus, PDFSegment, PublicationResult, SourceType
 from app.tasks import _PipelineDependencies, _run_pdf_pipeline
-from tests.test_api_routes import client, job_store, pdf_upload  # noqa: F401 (fixtures, reused not duplicated)
+from tests.test_api_routes import (  # noqa: F401 (fixtures, reused not duplicated)
+    _AUDIENCE,
+    _ISSUER,
+    _KID,
+    _PUBLIC_PEM,
+    _SCOPE,
+    client,
+    job_store,
+    mint_token,
+    pdf_upload,
+)
 from tests.test_tasks import FakeEmbedder, FakePDFProcessor, FakeRedis, RecordingPublisher, make_settings
 
 # ---------------------------------------------------------------------------
@@ -192,7 +202,14 @@ def test_property_26_job_ids_are_unique_across_n_real_api_creations(client, num_
 
     job_ids = []
     for _ in range(num_jobs):
-        response = client.post("/ingest/pdf", files=pdf_upload())
+        # Globally-unique content per call, not just per loop index: the
+        # `client` fixture (and its one IngestionLock/fakeredis instance)
+        # is reused across EVERY Hypothesis example in this test (that is
+        # what suppress_health_check=[function_scoped_fixture] signs off
+        # on), so index-based content like f"job {i}" would collide with
+        # an earlier example's own iteration 0, 1, 2, ... and be spuriously
+        # rejected as a Stage 2 Part B content-hash duplicate.
+        response = client.post("/ingest/pdf", files=pdf_upload(content=f"%PDF-1.4 {uuid.uuid4()}".encode()))
         assert response.status_code == 202
         job_ids.append(response.json()["job_id"])
 
@@ -212,10 +229,13 @@ def test_property_26_job_ids_unique_across_mixed_endpoint_types(client, num_jobs
 
     job_ids = []
     for i in range(num_jobs):
+        # Globally-unique content/URL per call, not just per loop index --
+        # see the sibling test above for why (Stage 2 Part B content-hash
+        # dedup against a fixture reused across Hypothesis examples).
         if i % 2 == 0:
-            response = client.post("/ingest/pdf", files=pdf_upload())
+            response = client.post("/ingest/pdf", files=pdf_upload(content=f"%PDF-1.4 {uuid.uuid4()}".encode()))
         else:
-            response = client.post("/ingest/youtube", json={"url": "https://www.youtube.com/watch?v=abc123"})
+            response = client.post("/ingest/youtube", json={"url": f"https://www.youtube.com/watch?v={uuid.uuid4().hex[:11]}"})
         job_ids.append(response.json()["job_id"])
 
     assert len(set(job_ids)) == len(job_ids)
@@ -402,9 +422,11 @@ def test_property_29_pagination_reconstructs_full_dataset_no_duplicates_no_omiss
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    from app.api.auth_dependency import get_service_jwt_verifier
     from app.api.file_storage import FileStorage
     from app.api.routes import get_file_storage, get_job_store, router
     from app.config.settings import Settings
+    from app.security.service_jwt import ServiceJWTVerifier
 
     app = FastAPI()
     app.include_router(router)
@@ -412,11 +434,40 @@ def test_property_29_pagination_reconstructs_full_dataset_no_duplicates_no_omiss
     isolated_settings = Settings(upload_directory=str(tmp_path / f"uploads-{total}-{page_size}"), _env_file=None)
     app.dependency_overrides[get_job_store] = lambda: isolated_job_store
     app.dependency_overrides[get_file_storage] = lambda: FileStorage(settings=isolated_settings)
-    local_client = TestClient(app)
+    # Security Hardening Stage 1: this route now requires an internal
+    # service JWT -- see test_api_routes.py's own client fixture for the
+    # full rationale; this isolated app/client needs the same override
+    # since it deliberately does not reuse that shared fixture.
+    app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+        public_keys_by_kid={_KID: _PUBLIC_PEM},
+        expected_issuer=_ISSUER,
+        expected_audience=_AUDIENCE,
+        required_scope=_SCOPE,
+    )
+    # Stage 2 Part B: isolated per-example fakeredis instance -- see
+    # test_api_routes.py's own client fixture for the full rationale;
+    # without this, EVERY Hypothesis example in this one test would share
+    # the same real Redis dedup state (all using the identical default
+    # `pdf_upload()` bytes), and every example after the first would be
+    # spuriously rejected as a duplicate of the one before it.
+    import fakeredis
+
+    from app.api.routes import get_ingestion_lock
+    from app.pipeline.ingestion_lock import IngestionLock
+
+    ingestion_lock = IngestionLock(fakeredis.FakeRedis(decode_responses=True))
+    app.dependency_overrides[get_ingestion_lock] = lambda: ingestion_lock
+    local_client = TestClient(app, headers={"Authorization": f"Bearer {mint_token()}"})
 
     created_ids = []
-    for _ in range(total):
-        response = local_client.post("/ingest/pdf", files=pdf_upload())
+    for i in range(total):
+        # Each upload must have genuinely distinct content: this test's
+        # own purpose is pagination over `total` real, distinct jobs, and
+        # Stage 2 Part B's content-hash dedup would otherwise correctly
+        # reject the 2nd..nth upload as a duplicate of the 1st (they were
+        # previously all identical bytes, which only "worked" because of
+        # a since-fixed bug that gave every request a fresh, empty lock).
+        response = local_client.post("/ingest/pdf", files=pdf_upload(content=f"%PDF-1.4 job number {i}".encode()))
         created_ids.append(response.json()["job_id"])
 
     seen_ids: list[str] = []

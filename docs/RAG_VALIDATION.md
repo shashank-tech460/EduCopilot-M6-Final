@@ -179,7 +179,7 @@ supplement + 31-case main acceptance battery).
 **Objective:** consolidate the accepted RAG work into a clean,
 documented, auditable git checkpoint. No retrieval/embedding/security
 logic changed.
-**Artifact:** `docs/REPOSITORY_CLEANUP_REPORT.md`.
+**Artifact:** `docs/history/REPOSITORY_CLEANUP_REPORT.md`.
 
 ---
 

@@ -71,6 +71,29 @@ const fileSchema = new Schema(
       type: String,
       required: false,
     },
+    /**
+     * Stage 9 — client-generated (crypto.randomUUID(), team4c/components/
+     * shared/workspace-files.tsx's own existing per-upload `uploadId`,
+     * reused as-is rather than inventing a second identifier) and stable
+     * across every retry of the SAME logical upload attempt, never
+     * regenerated on retry. Lets `POST /api/workspaces/[id]/files`
+     * recognize "this is a retry of an attempt whose response the client
+     * never received" and reuse the existing File (retrying ingestion on
+     * its already-stored bytes) instead of creating a second File
+     * document with a second stored copy of the same content — see
+     * lib/ingestion.ts's `resolveUploadedFile()`.
+     *
+     * `unique: true` + `sparse: true` — same pattern as `Conversation.
+     * ragSessionId` — enforces no two Files ever share a key once one is
+     * assigned, while permitting any number of documents with no key at
+     * all (a request that never sent one; every pre-Stage-9 document).
+     */
+    uploadIdempotencyKey: {
+      type: String,
+      required: false,
+      unique: true,
+      sparse: true,
+    },
     // Rev.4.4 Phase 1 (authorized minimal schema addition): the
     // authoritative current ingestion generation for this File. Team 4A's
     // MongoAuthorityClient is the only external consumer that ever writes

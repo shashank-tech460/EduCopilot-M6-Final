@@ -283,6 +283,51 @@ class Settings(BaseSettings):
         lt=1,
     )
 
+    # -- Stage 2 Part B: legacy route (/ingest/pdf|video|youtube)
+    # content-hash deduplication -------------------------------------
+    #: Unlike the canonical /v1/ingest path (an in-process orchestration
+    #: that actively RENEWs its lock throughout processing), the legacy
+    #: routes only dispatch to a fire-and-forget Celery task and return
+    #: immediately -- there is no in-process owner left alive to release
+    #: this lock once processing genuinely finishes. It is therefore
+    #: sized as a fixed window generous enough to cover this project's
+    #: own measured PDF/video processing times (Team4A's own docs cite
+    #: 8-55s per ingestion) with real headroom, not as a lease that gets
+    #: renewed -- a duplicate submission of the EXACT SAME file content
+    #: within this window is rejected; the same content submitted again
+    #: after this window elapses is treated as a fresh, legitimate
+    #: request (e.g. a deliberate re-upload after deleting the original).
+    legacy_ingest_dedup_lease_seconds: int = Field(
+        default=600,
+        description="How long a legacy-route content hash stays claimed, rejecting duplicate submissions of the same bytes/URL.",
+        gt=0,
+    )
+
+    # -- Stage 2 Part C: stuck-job (worker-crash) recovery ----------------
+    #: A legacy-route IngestionJob's `updated_at` is touched at task start
+    #: and at each of the 4 pipeline stage boundaries (app/tasks.py's
+    #: `_touch_and_persist`) -- if a worker crashes mid-task, no further
+    #: touch ever happens and the job is left at status=PROCESSING
+    #: forever (Celery's own `task_acks_late`/`visibility_timeout`
+    #: redelivery only helps once *some* worker is running again to poll
+    #: for it; a worker that is never restarted leaves the job stuck with
+    #: no path to recovery at all). There is deliberately no finer-grained
+    #: mid-stage heartbeat than these 4 touches (adding one would be a
+    #: pipeline-architecture change, out of this stage's scope), so
+    #: staleness cannot be distinguished from "one single stage is
+    #: legitimately still running" at a finer resolution than this. This
+    #: value is therefore set to match `ingestion_lock_lease_seconds`
+    #: (this project's own existing definition, on the canonical path, of
+    #: "the maximum time a worker may hold a single document before being
+    #: considered abandoned") rather than a new, smaller, arbitrary
+    #: number -- avoiding false positives against a genuinely long-running
+    #: single stage (e.g. Whisper transcription of a multi-hour video).
+    stale_processing_threshold_seconds: int = Field(
+        default=14400,
+        description="A legacy-route job stuck at status=PROCESSING with no progress touch for longer than this is treated as abandoned (worker crash), not merely slow, and recovered to FAILED.",
+        gt=0,
+    )
+
     # ------------------------------------------------------------------
     # Phase 2B (Rev.4.4 internal service JWT foundation).
     #

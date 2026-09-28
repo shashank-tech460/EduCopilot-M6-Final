@@ -1,97 +1,19 @@
 import { NextResponse } from "next/server";
-import type { HydratedDocument } from "mongoose";
 
 import { auth } from "@/lib/auth";
 import { connectToDatabase } from "@/lib/mongodb";
 import { assertOwnership, OwnershipError } from "@/lib/ownership";
-import { FileModel, type File as FileDoc } from "@/models/File";
+import { handOffToTeamA, resolveUploadedFile, serializeFile } from "@/lib/ingestion";
+import { FileModel } from "@/models/File";
 import { validateUploadedFile, validateYoutubeUrl } from "@/lib/validation";
-import { storeFile, referenceYoutubeUrl, mintLocalStorageRetrievalUrl } from "@/services/storage";
-import { getTeamAService } from "@/services/teamA";
-import { toCanonicalFileType } from "@/types/teamA";
+import { storeFile, referenceYoutubeUrl } from "@/services/storage";
 
-function serializeFile(file: HydratedDocument<FileDoc>) {
-  return {
-    id: file._id.toString(),
-    originalName: file.originalName,
-    type: file.type,
-    status: file.status,
-    processingError: file.processingError ?? null,
-    storageUrl: file.storageUrl,
-    createdAt: file.createdAt,
-    sizeBytes: file.sizeBytes ?? null,
-  };
-}
-
-/**
- * Drives a newly-created file through the Team A hand-off
- * (docs/decisions.md §6/§9): submit → store ingestionId → check status →
- * store the result. Uses whichever implementation getTeamAService()
- * currently resolves to (mock by default) — this function has no idea, and
- * doesn't need to, whether it's talking to the mock or a real service.
- *
- * Runs synchronously within the upload request — the REAL canonical
- * `/v1/ingest` (Phase 2C) is itself synchronous (it runs the full Phase 1
- * pipeline to completion before responding), so this was never actually
- * the async/background concern an earlier phase's comment anticipated.
- *
- * CANONICAL CONTRACT (Phase 2A freeze, unchanged): `document_id` is this
- * File's own `_id`. `workspace_id`/`user_id` are NEVER part of the wire
- * body sent to `/v1/ingest` — Phase 2D wires them in as the SEPARATE
- * `context` argument to `teamA.submit()` (`userId`, `file.workspaceId`),
- * which the real client (services/teamA/client.ts) uses only to mint the
- * Phase 2B internal service JWT, never to populate the request body.
- * `userId` here is the authenticated session's own id; `file.workspaceId`
- * was already confirmed by this route's own `assertOwnership()` call
- * before this function is ever invoked — this function relies on its
- * caller having already done so (Requirement 5).
- */
-async function handOffToTeamA(file: HydratedDocument<FileDoc>, userId: string): Promise<HydratedDocument<FileDoc>> {
-  const teamA = getTeamAService();
-
-  try {
-    // MVP M6 correction (round 2): the URL sent to Team 4A is minted
-    // fresh here, for THIS ingestion attempt only -- see
-    // services/storage.ts's `mintLocalStorageRetrievalUrl` for why this
-    // must be separate from `file.storageUrl` itself (which is
-    // permanent, capability-free, and browser-session-protected for
-    // citation clicks).
-    const fileUrlForIngestion = await mintLocalStorageRetrievalUrl({
-      storageUrl: file.storageUrl,
-      storageProvider: file.storageProvider,
-      publicId: file.publicId,
-      workspaceId: file.workspaceId.toString(),
-    });
-
-    const { ingestionId } = await teamA.submit(
-      {
-        document_id: file._id.toString(),
-        file_type: toCanonicalFileType(file.type),
-        file_url: fileUrlForIngestion,
-      },
-      // Phase 2D: server-verified identity, supplied ONLY here (never as
-      // part of the canonical request body above) -- `userId` is the
-      // authenticated session's own id, and `file.workspaceId` was
-      // already confirmed to belong to that user by this route's own
-      // `assertOwnership()` call before `handOffToTeamA` is ever invoked.
-      { sub: userId, workspace_id: file.workspaceId.toString() }
-    );
-
-    file.ingestionId = ingestionId;
-    file.status = "processing";
-    await file.save();
-
-    const statusResult = await teamA.checkStatus(ingestionId);
-    file.status = statusResult.status;
-    file.processingError = statusResult.error;
-    await file.save();
-  } catch (error) {
-    file.status = "failed";
-    file.processingError = error instanceof Error ? error.message : "Unknown ingestion error.";
-    await file.save();
-  }
-
-  return file;
+/** A blank/whitespace-only value is treated the same as "not sent" — the
+ * upload UI always sends a real crypto.randomUUID(), so this only ever
+ * matters for a malformed/manual request. */
+function readIdempotencyKey(formData: FormData): string | undefined {
+  const value = formData.get("uploadIdempotencyKey");
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 /**
@@ -164,6 +86,7 @@ export async function POST(
   }
 
   const materialType = formData.get("type");
+  const idempotencyKey = readIdempotencyKey(formData);
 
   if (materialType === "youtube_url") {
     const url = formData.get("youtubeUrl");
@@ -173,19 +96,33 @@ export async function POST(
       return NextResponse.json({ error }, { status: 400 });
     }
 
-    const stored = referenceYoutubeUrl(url.trim());
-    const file = await FileModel.create({
-      workspaceId,
-      userId: session.user.id,
-      originalName: url.trim(),
-      type: "youtube_url",
-      storageUrl: stored.storageUrl,
-      storageProvider: stored.storageProvider,
-      status: "uploading",
+    // Stage 9: `storeFile`/`referenceYoutubeUrl` only ever run INSIDE this
+    // closure, which `resolveUploadedFile` only calls when no existing
+    // attempt for this exact `uploadIdempotencyKey` was found — a retry
+    // of an ambiguous-outcome request never re-registers/re-stores.
+    const resolved = await resolveUploadedFile(workspaceId, idempotencyKey, async () => {
+      const stored = referenceYoutubeUrl(url.trim());
+      return FileModel.create({
+        workspaceId,
+        userId: session.user.id,
+        originalName: url.trim(),
+        type: "youtube_url",
+        storageUrl: stored.storageUrl,
+        storageProvider: stored.storageProvider,
+        status: "uploading",
+        uploadIdempotencyKey: idempotencyKey,
+      });
     });
 
-    const finished = await handOffToTeamA(file, session.user.id);
-    return NextResponse.json(serializeFile(finished), { status: 201 });
+    if (resolved.conflict) {
+      return NextResponse.json(
+        { error: "This upload is already in progress. Please wait a moment before trying again." },
+        { status: 409 }
+      );
+    }
+
+    const finished = resolved.alreadyReady ? resolved.file : await handOffToTeamA(resolved.file, session.user.id);
+    return NextResponse.json(serializeFile(finished), { status: resolved.reused ? 200 : 201 });
   }
 
   if (materialType === "pdf" || materialType === "video") {
@@ -196,21 +133,39 @@ export async function POST(
       return NextResponse.json({ error }, { status: 400 });
     }
 
-    const stored = await storeFile(uploaded, workspaceId);
-    const file = await FileModel.create({
-      workspaceId,
-      userId: session.user.id,
-      originalName: uploaded.name,
-      type: materialType,
-      storageUrl: stored.storageUrl,
-      storageProvider: stored.storageProvider,
-      publicId: stored.publicId,
-      status: "uploading",
-      sizeBytes: uploaded.size,
+    // Stage 9: `storeFile()` (the actual byte-storage write) only ever
+    // runs INSIDE this closure, which `resolveUploadedFile` only invokes
+    // when no existing File already matches this `uploadIdempotencyKey`
+    // — a retry whose earlier response the client never received (e.g.
+    // a dropped connection AFTER the server had already stored the bytes
+    // and created the File) is recognized by key and reused instead of
+    // storing a second copy of the same content under a second File
+    // document (Requirement 3).
+    const resolved = await resolveUploadedFile(workspaceId, idempotencyKey, async () => {
+      const stored = await storeFile(uploaded, workspaceId);
+      return FileModel.create({
+        workspaceId,
+        userId: session.user.id,
+        originalName: uploaded.name,
+        type: materialType,
+        storageUrl: stored.storageUrl,
+        storageProvider: stored.storageProvider,
+        publicId: stored.publicId,
+        status: "uploading",
+        sizeBytes: uploaded.size,
+        uploadIdempotencyKey: idempotencyKey,
+      });
     });
 
-    const finished = await handOffToTeamA(file, session.user.id);
-    return NextResponse.json(serializeFile(finished), { status: 201 });
+    if (resolved.conflict) {
+      return NextResponse.json(
+        { error: "This upload is already in progress. Please wait a moment before trying again." },
+        { status: 409 }
+      );
+    }
+
+    const finished = resolved.alreadyReady ? resolved.file : await handOffToTeamA(resolved.file, session.user.id);
+    return NextResponse.json(serializeFile(finished), { status: resolved.reused ? 200 : 201 });
   }
 
   return NextResponse.json({ error: "Unsupported material type." }, { status: 400 });

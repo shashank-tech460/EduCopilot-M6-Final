@@ -6,6 +6,7 @@ import { Film, Sparkles } from "lucide-react";
 import { Card, CardHeader, CardContent, CardTitle } from "@/components/ui/card";
 import { WorkspaceFiles, type MaterialSummary } from "@/components/shared/workspace-files";
 import { ChatPanel } from "@/components/chat/ChatPanel";
+import { ConversationSidebar } from "@/components/shared/ConversationSidebar";
 import { VideoPlayer } from "@/components/video/VideoPlayer";
 import { TabNavigation } from "@/components/shared/TabNavigation";
 import { PanelErrorBoundary } from "@/components/shared/PanelErrorBoundary";
@@ -180,7 +181,17 @@ export function WorkspaceDashboardShell({
                     AI Tutor
                   </CardTitle>
                 </CardHeader>
-                <ChatPanel workspaceId={workspaceId} />
+                {/* Conversation history rail + the existing Chat panel,
+                    side by side within the same card — the sidebar reuses
+                    ui.sidebarOpen (store/appStore.ts) to collapse without
+                    shrinking ChatPanel's own usable width below what it
+                    already had before this rail existed. */}
+                <div className="flex min-h-0 flex-1">
+                  <ConversationSidebar workspaceId={workspaceId} />
+                  <div className="min-w-0 flex-1">
+                    <ChatPanel workspaceId={workspaceId} />
+                  </div>
+                </div>
               </Card>
             </PanelErrorBoundary>
           </div>

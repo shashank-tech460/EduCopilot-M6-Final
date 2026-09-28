@@ -87,6 +87,13 @@ every rejected alternative and why) → `SECURITY_ARCHITECTURE.md` (the
 threat model and defenses) → `KNOWN_LIMITATIONS.md` (what's genuinely not
 solved) → `INTEGRATION.md` (how the pieces actually talk).
 
+For a much deeper, code-cited version of this same material — every claim tied to a
+file:line, written to build real understanding rather than just orient you — see
+[docs/guides/SYSTEM_ARCHITECTURE_GUIDE.md](guides/SYSTEM_ARCHITECTURE_GUIDE.md) and the
+per-service [docs/learning/](learning/) deep-dives. If you're preparing to explain this
+project out loud (a viva, an interview, a demo), [docs/interview/](interview/) is built for
+exactly that.
+
 ## Service startup order
 
 Infrastructure (MongoDB, Redis ×2, Qdrant, Ollama) → Team4A → Team4B →

@@ -37,9 +37,11 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import get_hybrid_retriever
 from app.api.routes import router
+from app.core.config import get_settings
 
 # PHASE 5C-2: `logging.basicConfig()` is a no-op if the root logger
 # already has a handler configured (its own documented behavior) --
@@ -105,6 +107,26 @@ def create_app() -> FastAPI:
 
     application = FastAPI(title="Team 4B — Advanced RAG & Semantic Search", lifespan=lifespan)
     application.include_router(router)
+
+    # SECURITY HARDENING STAGE 1: explicit, auditable CORS configuration
+    # -- see Settings.cors_allowed_origins' own docstring for why this
+    # defaults to an empty list (no legitimate browser origin calls this
+    # purely internal, service-to-service API directly). An empty
+    # `allow_origins` means CORSMiddleware never adds a permissive
+    # `Access-Control-Allow-Origin` header, matching this app's
+    # pre-existing (unconfigured) behavior exactly -- this makes that a
+    # deliberate decision instead of an accidental omission, and gives a
+    # real deployment a single, explicit setting to widen if it ever
+    # legitimately needs to (never done automatically by this codebase).
+    settings = get_settings()
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allowed_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     return application
 
 

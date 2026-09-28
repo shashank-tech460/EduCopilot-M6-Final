@@ -159,7 +159,12 @@ class QueryRequest(BaseModel):
     corrective task explicitly prohibits.
     """
 
-    query: str
+    #: Security Hardening Stage 1 -- previously unbounded, so an
+    #: arbitrarily large string flowed straight into retrieval and the
+    #: LLM prompt. 4000 characters is generous for a genuine question
+    #: (well beyond any real message this product's own UI has ever
+    #: sent) while bounding worst-case payload/prompt size.
+    query: str = Field(min_length=1, max_length=4000)
     session_id: str | None = Field(default=None)
     retrieval_config: RetrievalConfig | None = Field(default=None)
 

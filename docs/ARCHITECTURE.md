@@ -56,6 +56,27 @@ flowchart TB
     API --> UI
 ```
 
+### Final architecture diagrams
+
+The Mermaid diagram above renders natively on GitHub and is the fastest way
+to read the system while browsing this repository. For a presentation- or
+print-quality version — with ports, request-flow numbering, a legend, and a
+"known limitations" panel — see the finalized diagram package in
+[docs/architecture/](architecture/):
+
+| Diagram | Documentation quality | Presentation (16:9) |
+|---|---|---|
+| Complete System Architecture | [PNG](architecture/EduCopilot_M6_Complete_Architecture_Documentation.png) · [SVG](architecture/EduCopilot_M6_Complete_Architecture_Documentation.svg) | [PNG](architecture/EduCopilot_M6_Complete_Architecture_PPT_16x9.png) · [SVG](architecture/EduCopilot_M6_Complete_Architecture_PPT_16x9.svg) |
+| Detailed Technical Architecture (endpoints, ports, security, RAG config) | [PNG](architecture/EduCopilot_M6_Detailed_Architecture_Documentation.png) · [SVG](architecture/EduCopilot_M6_Detailed_Architecture_Documentation.svg) | Overview: [PNG](architecture/EduCopilot_M6_Detailed_Architecture_PPT_16x9.png) · [SVG](architecture/EduCopilot_M6_Detailed_Architecture_PPT_16x9.svg)<br>Technical details slide: [PNG](architecture/EduCopilot_M6_Detailed_Architecture_PPT_16x9_TechnicalDetails.png) · [SVG](architecture/EduCopilot_M6_Detailed_Architecture_PPT_16x9_TechnicalDetails.svg) |
+
+The Complete System Architecture diagram shows the request flow: student →
+Team4C → Team4A (ingestion) / Team4B (retrieval + generation) → shared
+storage, with a numbered flow-reference legend and each team's boundary
+color-coded. The Detailed Technical Architecture diagram is the reference
+for exact ports, endpoint lists, JWT claims, and RAG configuration values —
+see [docs/architecture/ARCHITECTURE_REFERENCE.md](architecture/ARCHITECTURE_REFERENCE.md)
+for the same facts in text form with their source locations.
+
 ## Service responsibilities
 
 | Service | Owns | Does not own |

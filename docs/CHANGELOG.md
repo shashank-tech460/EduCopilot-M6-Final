@@ -106,3 +106,33 @@ as separate files).
   discarding project history — marked clearly superseded where
   applicable instead of deleted, where the historical record itself had
   ongoing value.
+
+## 2026-09-28 — Reliability/security hardening and documentation cleanup
+
+Uncommitted as of this entry — see [M6_STATUS.md](M6_STATUS.md) for the
+committed-vs-uncommitted distinction.
+
+- **Team4A:** fixed duplicate ingestion on the legacy routes (content-hash
+  idempotency) and added stuck-job recovery for a job left in
+  `PROCESSING` past a stale threshold. 913 passed, 5 skipped.
+- **Team4B:** re-verified a previously-suspected retrieval root cause
+  (RRF normalization) against the current corpus and code rather than
+  trusting an earlier conclusion — did not reproduce; confirmed the real
+  prior fixes (`is_elliptical_query()`, BM25 corpus refresh) already hold.
+  Attempted a further prompt-injection mitigation (query-text
+  neutralization) — implemented and unit-tested, but a live retest showed
+  it does **not** stop a direct override attack; disclosed as such, not
+  claimed as a fix. 1438 passed, 3 skipped, 1 known pre-existing failure.
+- **Team4C:** fixed a dev-mode-only stuck-stream bug (Next.js Fast Refresh
+  orphaning an in-flight `useChat()` instance) with a client-side
+  watchdog, and a mobile sidebar layout default. 669 Vitest tests passed
+  (62 files), `tsc --noEmit` clean.
+- **Architecture diagrams:** produced two finalized architecture diagrams
+  (Complete System Architecture, Detailed Technical Architecture), each in
+  documentation and 16:9 presentation quality, PNG + editable SVG — see
+  [docs/architecture/](architecture/).
+- **Repository cleanup:** archived two historical cleanup-audit reports to
+  `docs/history/`; deleted four confirmed-obsolete, never-version-controlled
+  local backup directories; removed one accidental stray file; corrected
+  several stale cross-references between documents. Full detail:
+  [docs/DOCUMENTATION_CLEANUP_2026-09-28.md](DOCUMENTATION_CLEANUP_2026-09-28.md).

@@ -7,10 +7,13 @@ cd team4b
 python -m pytest -q
 ```
 
-**Expected baseline:** `1302 passed, 3 skipped, 1 known pre-existing
-failure`. This exact baseline has been re-verified, unchanged, at the end
-of every phase in the Phase 5D–5K RAG validation arc, and again in Phase
-5L after documentation/cleanup changes.
+**Expected baseline:** `1438 passed, 3 skipped, 1 known pre-existing
+failure` (re-run and reconfirmed 2026-09-28; the pass count has grown
+from earlier phases' `1302` baseline as new regression tests were added
+alongside real fixes — a rate-limiting test suite, a streaming-response
+test suite, and a lifespan/BM25-corpus-refresh test suite among them —
+not because the suite shrank or a check was removed). The one known
+failure's identity and root cause below are unchanged.
 
 If this changes:
 - **A new failure** → investigate before doing anything else; do not
@@ -81,14 +84,16 @@ Full detail: `team4b/data/m6_phase5k_prompt_injection_architecture_report.md`.
 
 ## Team4A test suite
 
-Not modified, re-baselined, or newly validated by the Phase 5D–5L RAG arc,
-or by the later Team4C product-integration work described below.
+Not modified by the Phase 5D–5L RAG arc or by the Team4C product-integration
+work described below. It was extended by a reliability-hardening pass
+(dedup + stale-job recovery, uncommitted as of 2026-09-28).
 
 ```bash
 cd team4a && python -m pytest -q
 ```
 
-Consult the service's own test output for its current numbers.
+**Expected baseline:** `913 passed, 5 skipped` (re-run and reconfirmed
+2026-09-28).
 
 ## Team4C test suite
 
@@ -110,14 +115,20 @@ npm run build               # production build
 
 **Current real baseline:**
 
-| Check | Result |
-|---|---|
-| `tsc --noEmit` | 0 errors |
-| `eslint .` | 9 pre-existing errors / 3 pre-existing warnings, all in test files unrelated to any product change — see below; 0 new introduced by any change described in this document |
-| `vitest run` | 469 tests passed (51 files) |
-| `playwright test` (auth-workspace, smoke, accessibility, workspace-isolation, source-isolation, core-rag, youtube-rag) | 13/13 passed |
-| accessibility (`@axe-core/playwright`) | 5/5 pages pass WCAG 2A/2AA (landing, login, signup, dashboard, workspace) |
-| `npm run build` | clean, all routes compile |
+| Check | Result | Last verified |
+|---|---|---|
+| `tsc --noEmit` | 0 errors | 2026-09-28 |
+| `eslint .` | 9 pre-existing errors / 3 pre-existing warnings, all in test files unrelated to any product change — see below; 0 new introduced by any change described in this document | earlier in the same development pass; not re-run 2026-09-28 |
+| `vitest run` | 669 tests passed (62 files) — grown from an earlier `469`/`51` baseline as new component/hook tests (conversation sidebar, stuck-stream watchdog, conversation messages, ingestion, session restoration, and others) were added alongside real fixes | 2026-09-28 |
+| `playwright test` (auth-workspace, smoke, accessibility, workspace-isolation, source-isolation, core-rag, youtube-rag) | 13/13 passed | earlier in the same development pass; not re-run 2026-09-28 |
+| accessibility (`@axe-core/playwright`) | 5/5 pages pass WCAG 2A/2AA (landing, login, signup, dashboard, workspace) | earlier in the same development pass; not re-run 2026-09-28 |
+| `npm run build` | clean, all routes compile | earlier in the same development pass; not re-run 2026-09-28 |
+
+Nothing affecting ESLint, Playwright, accessibility, or the build has
+changed between that earlier verification and 2026-09-28 — the changes in
+between were `tsc`/`vitest`-covered fixes (see
+[M6_STATUS.md](M6_STATUS.md)) and documentation/diagram work only. Re-run
+the full command list above yourself before relying on this if in doubt.
 
 **Distinguishing pre-existing ESLint issues from new ones**: the 9
 pre-existing errors are all `@typescript-eslint/no-explicit-any` in two

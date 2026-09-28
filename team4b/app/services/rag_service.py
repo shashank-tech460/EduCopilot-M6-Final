@@ -60,13 +60,15 @@ assistant turn is ever fabricated. No rollback of the user turn is
 implemented, per the explicit instruction not to invent transactional
 semantics the specification doesn't require.
 
-DOCUMENTED DECISION -- retrieval_metadata contents: kept to the two
-fields already referenced elsewhere in this project's own documentation
-(`app/models/query.py`'s docstring, itself citing Property 15's naming) --
-`chunks_retrieved` and `search_mode` -- rather than inventing a larger
-schema. `QueryResponse.retrieval_metadata` is typed as an intentionally
-open `dict[str, Any]`; this orchestrator populates it minimally, leaving
-room for Task 7.2/8.1 to add more without this module needing to change.
+DOCUMENTED DECISION -- retrieval_metadata contents: originally kept to
+the two fields already referenced elsewhere in this project's own
+documentation (`app/models/query.py`'s docstring, itself citing Property
+15's naming) -- `chunks_retrieved` and `search_mode` -- rather than
+inventing a larger schema. `QueryResponse.retrieval_metadata` is typed as
+an intentionally open `dict[str, Any]`, which is exactly what let Stage 8
+add a third key, `grounded` (an explicit bool, present only when
+`LLMGenerator.generate()` produced a real signal -- see that module's own
+Stage 8 note), without this module needing any structural change at all.
 
 SEARCHMODE CONVERSION AT THE BOUNDARY (per this task's explicit
 instruction not to refactor the known SearchMode duplication):
@@ -93,7 +95,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 from app.models.query import RetrievalConfig
 from app.models.retrieval import RetrievalResult
@@ -103,7 +105,7 @@ from app.services.conversation import ConversationTurn as _ConversationTurn
 from app.services.followup_context import build_enriched_retrieval_query, is_elliptical_query
 from app.services.hybrid_retriever import HybridRetriever
 from app.services.hybrid_retriever import SearchMode as _HybridRetrieverSearchMode
-from app.services.llm_generator import LLMGenerator
+from app.services.llm_generator import LLMGenerator, StreamDelta
 
 
 @dataclass
@@ -149,6 +151,23 @@ def _most_recent_user_turn(history: list[_ConversationTurn]) -> str | None:
     return None
 
 
+@dataclass
+class _PreparedQuery:
+    """Stage 9B -- everything `handle_query()` and `handle_query_stream()`
+    both need BEFORE generation, computed exactly once by
+    `RAGService._prepare_query()` and shared between them, so the
+    casual-intent gate, follow-up enrichment, and retrieval-invocation
+    logic exist in exactly one place regardless of which of the two
+    (streaming or not) a caller uses.
+    """
+
+    resolved_session_id: str
+    config: RetrievalConfig
+    history: list[_ConversationTurn]
+    is_casual: bool
+    retrieval_results: list[RetrievalResult]
+
+
 class RAGService:
     """Orchestrates ConversationManager, HybridRetriever, and
     LLMGenerator to answer one query. Contains no retrieval, storage, or
@@ -165,35 +184,22 @@ class RAGService:
         self._conversation_manager = conversation_manager
         self._llm_generator = llm_generator
 
-    def handle_query(
+    def _prepare_query(
         self,
         query: str,
         *,
         workspace_id: str,
-        session_id: str | None = None,
-        retrieval_config: RetrievalConfig | None = None,
-    ) -> RAGServiceResult:
-        """Answer `query`, using `session_id`'s conversation history
-        (or a freshly generated session_id if none is supplied) and
-        `retrieval_config` (or its own defaults if none is supplied).
-
-        `workspace_id` is REQUIRED (keyword-only, no default) -- MVP M3's
-        mandatory multi-tenant isolation boundary, threaded straight into
-        `HybridRetriever.retrieve()`'s own mandatory `workspace_id`
-        parameter. This method has no code path that retrieves without
-        it, and `RetrievalConfig` (the one caller-configurable knob this
-        method accepts) has no `workspace_id`-shaped field a caller could
-        use to influence or override it -- the two are structurally
-        independent.
-
-        Raises whatever domain exception the failing component raises
-        (`VectorStoreUnavailableError`, `LLMUnavailableError`,
-        `ConversationStoreUnavailableError`, `InvalidSearchModeError`,
-        `InvalidConversationRoleError`) -- none of them are caught,
-        wrapped, or converted into a generic exception here. See the
-        module docstring's "turn persistence order" decision for exactly
-        what is and isn't persisted when a failure occurs partway
-        through.
+        session_id: str | None,
+        retrieval_config: RetrievalConfig | None,
+    ) -> _PreparedQuery:
+        """Everything before generation: session resolution, history
+        read, persisting the user's turn, the casual-intent gate, and
+        (for a non-casual query) follow-up enrichment and retrieval.
+        Entirely synchronous -- `VectorStoreUnavailableError` /
+        `ConversationStoreUnavailableError` propagate from THIS call
+        immediately, before any generation (streaming or not) is ever
+        attempted, exactly matching `handle_query()`'s original,
+        pre-Stage-9B behavior.
         """
 
         resolved_session_id = session_id if session_id is not None else str(uuid.uuid4())
@@ -218,14 +224,7 @@ class RAGService:
         # exactly the same reason it always does for an empty list,
         # with no special-casing needed there at all.
         if is_casual_message(query):
-            answer = self._llm_generator.generate_conversational(query, conversation_history=history)
-            self._conversation_manager.append_turn(resolved_session_id, "assistant", answer)
-            return RAGServiceResult(
-                answer=answer,
-                session_id=resolved_session_id,
-                retrieval_results=[],
-                retrieval_metadata={"chunks_retrieved": 0, "search_mode": config.search_mode.value, "casual_intent": True},
-            )
+            return _PreparedQuery(resolved_session_id, config, history, True, [])
 
         hybrid_retriever_search_mode: _HybridRetrieverSearchMode = config.search_mode.value
 
@@ -276,24 +275,181 @@ class RAGService:
             document_ids=config.document_ids,
         )
 
+        return _PreparedQuery(resolved_session_id, config, history, False, retrieval_results)
+
+    def handle_query(
+        self,
+        query: str,
+        *,
+        workspace_id: str,
+        session_id: str | None = None,
+        retrieval_config: RetrievalConfig | None = None,
+    ) -> RAGServiceResult:
+        """Answer `query`, using `session_id`'s conversation history
+        (or a freshly generated session_id if none is supplied) and
+        `retrieval_config` (or its own defaults if none is supplied).
+
+        `workspace_id` is REQUIRED (keyword-only, no default) -- MVP M3's
+        mandatory multi-tenant isolation boundary, threaded straight into
+        `HybridRetriever.retrieve()`'s own mandatory `workspace_id`
+        parameter. This method has no code path that retrieves without
+        it, and `RetrievalConfig` (the one caller-configurable knob this
+        method accepts) has no `workspace_id`-shaped field a caller could
+        use to influence or override it -- the two are structurally
+        independent.
+
+        Raises whatever domain exception the failing component raises
+        (`VectorStoreUnavailableError`, `LLMUnavailableError`,
+        `ConversationStoreUnavailableError`, `InvalidSearchModeError`,
+        `InvalidConversationRoleError`) -- none of them are caught,
+        wrapped, or converted into a generic exception here. See the
+        module docstring's "turn persistence order" decision for exactly
+        what is and isn't persisted when a failure occurs partway
+        through.
+        """
+
+        prepared = self._prepare_query(
+            query, workspace_id=workspace_id, session_id=session_id, retrieval_config=retrieval_config
+        )
+
+        if prepared.is_casual:
+            answer = self._llm_generator.generate_conversational(query, conversation_history=prepared.history)
+            self._conversation_manager.append_turn(prepared.resolved_session_id, "assistant", answer)
+            return RAGServiceResult(
+                answer=answer,
+                session_id=prepared.resolved_session_id,
+                retrieval_results=[],
+                retrieval_metadata={
+                    "chunks_retrieved": 0,
+                    "search_mode": prepared.config.search_mode.value,
+                    "casual_intent": True,
+                },
+            )
+
         # If this raises (LLMUnavailableError), no assistant turn is
         # ever appended -- the exception propagates unmodified. Note:
-        # `generate()` receives the ORIGINAL `query`, never
-        # `retrieval_query` -- the enrichment is retrieval-only, exactly
-        # as required.
-        answer = self._llm_generator.generate(query, retrieval_results, conversation_history=history)
+        # `generate()` receives the ORIGINAL `query`, never the
+        # (possibly follow-up-enriched) retrieval query -- the
+        # enrichment is retrieval-only, exactly as required.
+        #
+        # Stage 8: `generate()` now returns a `GenerationResult` (answer +
+        # an explicit grounding signal) rather than a bare string -- see
+        # `app/services/llm_generator.py`'s own module-level Stage 8 note.
+        generation_result = self._llm_generator.generate(
+            query, prepared.retrieval_results, conversation_history=prepared.history
+        )
 
         # Only reached after successful generation.
-        self._conversation_manager.append_turn(resolved_session_id, "assistant", answer)
+        self._conversation_manager.append_turn(prepared.resolved_session_id, "assistant", generation_result.answer)
 
         retrieval_metadata: dict[str, Any] = {
-            "chunks_retrieved": len(retrieval_results),
-            "search_mode": config.search_mode.value,
+            "chunks_retrieved": len(prepared.retrieval_results),
+            "search_mode": prepared.config.search_mode.value,
         }
+        # Stage 8: `grounded` is added ONLY when an explicit True/False
+        # signal exists -- `None` (zero-retrieval short-circuit, already
+        # unreachable here since retrieval_results is non-empty on this
+        # path, or a genuine structured-output format violation) is
+        # deliberately OMITTED rather than written as `None`, so Team 4C's
+        # own `typeof retrieval_metadata.grounded === "boolean"` check
+        # sees a plain absent key -- exactly the same "no explicit
+        # signal" shape a backend that doesn't support Stage 8 at all
+        # would already produce, per the approved "suppress citations
+        # only on explicit signal" design.
+        if generation_result.grounded is not None:
+            retrieval_metadata["grounded"] = generation_result.grounded
 
         return RAGServiceResult(
-            answer=answer,
-            session_id=resolved_session_id,
-            retrieval_results=retrieval_results,
+            answer=generation_result.answer,
+            session_id=prepared.resolved_session_id,
+            retrieval_results=prepared.retrieval_results,
             retrieval_metadata=retrieval_metadata,
         )
+
+    def handle_query_stream(
+        self,
+        query: str,
+        *,
+        workspace_id: str,
+        session_id: str | None = None,
+        retrieval_config: RetrievalConfig | None = None,
+    ) -> Iterator[StreamDelta | RAGServiceResult]:
+        """Stage 9B -- streaming counterpart to `handle_query()`. Yields
+        zero or more `StreamDelta` events carrying successive answer-text
+        fragments, followed by EXACTLY ONE final `RAGServiceResult` once
+        generation completes -- the exact same contract
+        `LLMGenerator.generate_stream()` itself follows, one level up.
+
+        All pre-generation work (`_prepare_query()`: history read, user-
+        turn persistence, the casual-intent gate, follow-up enrichment,
+        retrieval) runs SYNCHRONOUSLY as part of THIS call, before any
+        iterator is returned -- so `VectorStoreUnavailableError` /
+        `ConversationStoreUnavailableError` raise immediately from this
+        call, exactly like `handle_query()`, never deferred into the
+        returned iterator. Only `LLMUnavailableError` (a failure in the
+        generation phase itself) is raised lazily, when the returned
+        iterator is actually consumed -- an inherent property of
+        streaming the generation phase specifically.
+        """
+
+        prepared = self._prepare_query(
+            query, workspace_id=workspace_id, session_id=session_id, retrieval_config=retrieval_config
+        )
+
+        if prepared.is_casual:
+            return self._stream_casual_result(query, prepared)
+
+        return self._stream_generated_result(query, prepared)
+
+    def _stream_casual_result(self, query: str, prepared: _PreparedQuery) -> Iterator[RAGServiceResult]:
+        """A casual reply has nothing to stream token-by-token in this
+        orchestrator's own contract (see `LLMGenerator.generate_stream()`'s
+        own scope -- it has no casual-reply streaming counterpart either,
+        since `generate_conversational()` was never given one); this
+        yields the single, already-complete `RAGServiceResult`, matching
+        `handle_query()`'s own casual-path result exactly.
+        """
+
+        answer = self._llm_generator.generate_conversational(query, conversation_history=prepared.history)
+        self._conversation_manager.append_turn(prepared.resolved_session_id, "assistant", answer)
+        yield RAGServiceResult(
+            answer=answer,
+            session_id=prepared.resolved_session_id,
+            retrieval_results=[],
+            retrieval_metadata={
+                "chunks_retrieved": 0,
+                "search_mode": prepared.config.search_mode.value,
+                "casual_intent": True,
+            },
+        )
+
+    def _stream_generated_result(self, query: str, prepared: _PreparedQuery) -> Iterator[StreamDelta | RAGServiceResult]:
+        for event in self._llm_generator.generate_stream(
+            query, prepared.retrieval_results, conversation_history=prepared.history
+        ):
+            if isinstance(event, StreamDelta):
+                yield event
+                continue
+
+            # The final GenerationResult -- only reached once generation
+            # (or the zero-retrieval short-circuit) has fully completed.
+            # Only reached after successful generation, mirroring
+            # handle_query()'s own "assistant turn persisted only on
+            # success" guarantee -- a mid-stream LLMUnavailableError
+            # propagates out of the `for` loop above before this point is
+            # ever reached, so no assistant turn is appended for it.
+            self._conversation_manager.append_turn(prepared.resolved_session_id, "assistant", event.answer)
+
+            retrieval_metadata: dict[str, Any] = {
+                "chunks_retrieved": len(prepared.retrieval_results),
+                "search_mode": prepared.config.search_mode.value,
+            }
+            if event.grounded is not None:
+                retrieval_metadata["grounded"] = event.grounded
+
+            yield RAGServiceResult(
+                answer=event.answer,
+                session_id=prepared.resolved_session_id,
+                retrieval_results=prepared.retrieval_results,
+                retrieval_metadata=retrieval_metadata,
+            )

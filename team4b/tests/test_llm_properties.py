@@ -317,7 +317,7 @@ class TestZeroChunkCaseIsNotAP8Violation:
 
         answer = generator.generate(query, [], conversation_history=history)
 
-        assert answer == INSUFFICIENT_CONTEXT_MESSAGE
+        assert answer.answer == INSUFFICIENT_CONTEXT_MESSAGE
         assert client.calls == []  # confirmed: no prompt was ever built or sent
 
 

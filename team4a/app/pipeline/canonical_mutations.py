@@ -27,9 +27,42 @@ Exactly two delete shapes exist, matching Rev.4.4 precisely -- no others:
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol, Sequence
+from contextlib import contextmanager
+from typing import Any, Iterator, Protocol, Sequence
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _tolerate_missing_collection(collection_name: str) -> Iterator[None]:
+    """STEP 1 REMEDIATION: a delete call against a collection that does
+    not exist (yet) has nothing to delete -- Qdrant reports this as an
+    HTTP 404 `UnexpectedResponse`, which previously propagated uncaught
+    and crashed the caller (see `canonical_ingestion.py`'s self-heal
+    path, called after a publish failure -- if the publish failed
+    because the canonical collection didn't exist yet, the self-heal
+    cleanup for the zero points that were ever actually published hit
+    the SAME missing-collection 404, unhandled, masking the real
+    publish failure behind a bare, undiagnosable 500).
+
+    Only a 404 is swallowed -- any other status (auth failure, a
+    genuine server error, a malformed request) still propagates
+    unchanged, so a real problem is never silently hidden alongside
+    this one, narrow, well-understood case.
+    """
+
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    try:
+        yield
+    except UnexpectedResponse as exc:
+        if exc.status_code == 404:
+            logger.info(
+                "Delete against a not-yet-existing collection -- nothing to delete",
+                extra={"collection": collection_name},
+            )
+            return
+        raise
 
 
 class QdrantMutationClientProtocol(Protocol):
@@ -72,7 +105,8 @@ class RealQdrantMutationClient:
         from qdrant_client.models import PointIdsList
 
         client = self._ensure_client()
-        client.delete(collection_name=collection_name, points_selector=PointIdsList(points=list(point_ids)))
+        with _tolerate_missing_collection(collection_name):
+            client.delete(collection_name=collection_name, points_selector=PointIdsList(points=list(point_ids)))
 
     def delete_points_by_generation_filter(
         self, collection_name: str, document_id: str, less_than_generation: int
@@ -80,25 +114,26 @@ class RealQdrantMutationClient:
         from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue, Range
 
         client = self._ensure_client()
-        client.delete(
-            collection_name=collection_name,
-            points_selector=FilterSelector(
-                filter=Filter(
-                    must=[
-                        FieldCondition(key="document_id", match=MatchValue(value=document_id)),
-                        # Strictly "<" only -- Range's `lt` param, never `ne`/"!=".
-                        # This is the corrected, monotonic filter (Rev.4.4 §8.2.2.3):
-                        # a point at `less_than_generation` or higher can never
-                        # match `lt=less_than_generation`, as a static property of
-                        # the comparison itself, regardless of execution timing.
-                        FieldCondition(
-                            key="ingestion_generation",
-                            range=Range(lt=less_than_generation),
-                        ),
-                    ]
-                )
-            ),
-        )
+        with _tolerate_missing_collection(collection_name):
+            client.delete(
+                collection_name=collection_name,
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[
+                            FieldCondition(key="document_id", match=MatchValue(value=document_id)),
+                            # Strictly "<" only -- Range's `lt` param, never `ne`/"!=".
+                            # This is the corrected, monotonic filter (Rev.4.4 §8.2.2.3):
+                            # a point at `less_than_generation` or higher can never
+                            # match `lt=less_than_generation`, as a static property of
+                            # the comparison itself, regardless of execution timing.
+                            FieldCondition(
+                                key="ingestion_generation",
+                                range=Range(lt=less_than_generation),
+                            ),
+                        ]
+                    )
+                ),
+            )
 
 
 def delete_exact_points(

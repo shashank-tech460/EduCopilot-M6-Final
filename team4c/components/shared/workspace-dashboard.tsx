@@ -39,6 +39,7 @@ import { Label } from "@/components/ui/label";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { toast } from "@/store/useToastStore";
+import { useHydrated } from "@/hooks/useHydrated";
 
 export interface WorkspaceSummary {
   id: string;
@@ -72,7 +73,44 @@ interface WorkspaceDashboardProps {
  */
 export function WorkspaceDashboard({ userName, initialWorkspaces }: WorkspaceDashboardProps) {
   const router = useRouter();
+  /**
+   * Stage 10 — closes a live-reproduced hydration race: "Create
+   * Workspace" (below) could silently swallow the very first click on a
+   * freshly-loaded page. See hooks/useHydrated.ts's own docstring for
+   * the full mechanism.
+   */
+  const hydrated = useHydrated();
   const [workspaces, setWorkspaces] = useState(initialWorkspaces);
+  /**
+   * Stage 10 — same root cause and fix as `WorkspaceFiles`' own Learning
+   * Materials refresh bug (components/shared/workspace-files.tsx): a
+   * plain `useState(initialWorkspaces)` initializer only seeds state
+   * once, at mount, so React never applies a later, changed
+   * `initialWorkspaces` prop on its own. This component's docstring
+   * above claims it "re-syncs with the server via router.refresh()" —
+   * that was never actually true, since neither `router.refresh()` call
+   * below had any way to reach this component's own `workspaces` state.
+   * In practice this mostly self-masked here (unlike the Learning
+   * Materials panel) because both existing `router.refresh()` call
+   * sites immediately follow a matching optimistic `setWorkspaces(...)`
+   * of their own — but a per-workspace `materialCount`/`readyCount`
+   * chip changing because a DIFFERENT action (ingestion finishing in a
+   * workspace the user isn't even viewing) would never be picked up
+   * while this page stayed mounted.
+   *
+   * Fixed via React's own documented "adjust state during render" (not
+   * an effect) pattern for exactly this situation, rather than a
+   * `useEffect` calling `setState` directly in its body — the latter is
+   * flagged by this project's own react-hooks/set-state-in-effect rule,
+   * since an unconditional setState-in-effect causes an extra, avoidable
+   * render pass; comparing against a tracked previous prop value during
+   * render lets React apply the update in the SAME render pass instead.
+   */
+  const [prevInitialWorkspaces, setPrevInitialWorkspaces] = useState(initialWorkspaces);
+  if (initialWorkspaces !== prevInitialWorkspaces) {
+    setPrevInitialWorkspaces(initialWorkspaces);
+    setWorkspaces(initialWorkspaces);
+  }
   const [dialogOpen, setDialogOpen] = useState(false);
   const [name, setName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
@@ -164,7 +202,7 @@ export function WorkspaceDashboard({ userName, initialWorkspaces }: WorkspaceDas
         actions={
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
-              <Button size="sm">
+              <Button size="sm" disabled={!hydrated}>
                 <Plus className="h-4 w-4" />
                 Create Workspace
               </Button>

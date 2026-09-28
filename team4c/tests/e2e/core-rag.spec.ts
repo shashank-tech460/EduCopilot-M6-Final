@@ -132,8 +132,22 @@ test.describe("Journey B — core RAG (upload, chat, answer, citation)", () => {
     // clickable element (SourceAttribution component) -- proves the
     // real Team4B response's source_attributions survived Team4C's own
     // workspace-filtering (lib/workspaceFilter.ts) and reached the UI.
-    const citation = page.getByRole("button", { name: /sample-course-notes/i });
-    await expect(citation.or(page.locator('[aria-disabled="true"]'))).toBeVisible({ timeout: 5000 });
+    //
+    // Stage 10 FIX: the previous `/sample-course-notes/i` name pattern
+    // was too broad -- it also matches the Learning Materials panel's
+    // OWN "Open sample-course-notes.pdf" button (components/shared/
+    // MaterialCard.tsx), a real, unrelated, always-present element on
+    // this same page. Confirmed live: the RAG flow itself worked
+    // perfectly (a real grounded answer with "Sources (3)" citations
+    // rendered) -- this was purely a test-selector specificity bug,
+    // Playwright's strict mode correctly refused to guess between the
+    // now-multiple real matches. SourceAttribution.tsx renders each
+    // citation's accessible name as `{sourceFile} · Page {N}` (a PDF)
+    // -- that "· Page" separator is what the Materials panel's own
+    // "Open <file>" button never has, so matching on it selects only a
+    // real citation.
+    const citation = page.getByRole("button", { name: /sample-course-notes.*· Page/i });
+    await expect(citation.or(page.locator('[aria-disabled="true"]')).first()).toBeVisible({ timeout: 5000 });
 
     // --- Phase 6D Step 13: genuine follow-up (Journey B extension) ---
     // Reuses the SAME conversation/ragSessionId already established

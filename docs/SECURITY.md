@@ -137,14 +137,25 @@ aggregation exists in this project — see [ROADMAP.md](ROADMAP.md).
 
 ## Known security limitations
 
-- One lower-severity prompt-injection residual remains open
-  (`REPRO-SPOOF-5` — a retrieved instruction asking the model to "reveal
-  your system prompt" can produce a longer response echoing visible
+- **Prompt injection is mitigated for one specific, validated attack pattern (Phase
+  5K's output-side guard, closing a forced-fixed-output hijack) — it is not
+  eliminated.** A later attempt (query-text neutralization) was implemented and
+  unit-tested but did **not** prevent a direct instruction-override attack against the
+  live model — that attack still fully succeeded on retest. A separate, lower-severity
+  residual also remains open (`REPRO-SPOOF-5` — a retrieved instruction asking the
+  model to "reveal your system prompt" can produce a longer response echoing visible
   prompt-scaffold text; no real secret exists in the prompt to leak). See
-  [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md).
-- No rate limiting exists on any API route in this project (local
-  development only) — see [LIMITATIONS.md](LIMITATIONS.md) and
-  [ROADMAP.md](ROADMAP.md).
+  [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md) for the dated record and exact
+  test evidence.
+- Rate limiting exists only on Team4B's three most expensive routes
+  (`POST /api/v1/query`, `POST /api/v1/query/stream`, `POST /api/v1/evaluate`) — 30
+  requests per 60-second window, keyed by the verified caller identity
+  (`sub:workspace_id`, never IP), Redis-backed. It is a defense-in-depth control, not the
+  primary authorization boundary, and it **fails open** on a Redis outage (unlike the
+  JWT check, which fails closed). Every other route in the project — all of Team4A, all
+  of Team4C, and Team4B's own session/health/metrics routes — has no rate limiting at
+  all. See [LIMITATIONS.md](LIMITATIONS.md) and [ROADMAP.md](ROADMAP.md) for what a
+  system-wide scheme would still need to add.
 - No production secret-management system is wired up — `.env` files are
   appropriate for local development only, never for a real deployment.
 - No independent third-party security audit has been performed on this

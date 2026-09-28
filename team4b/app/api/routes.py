@@ -3,6 +3,8 @@ Query API, the Evaluation API, and Health/Observability.
 
     POST /api/v1/query
     GET  /api/v1/sessions/{session_id}/history
+    POST /api/v1/sessions/{session_id}/seed
+    DELETE /api/v1/sessions/{session_id}
     POST /api/v1/evaluate
     GET  /health
     GET  /metrics
@@ -48,20 +50,25 @@ itself raise and break a request; see that route's own comments).
 
 from __future__ import annotations
 
+import itertools
+import json
 import logging
 import time
-from typing import Callable
+from typing import Callable, Iterator
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api.auth_dependency import require_query_identity
+from app.api.rate_limit import rate_limited_query_identity
 from app.models.evaluation import EvaluationItem, EvaluationResponse
 from app.models.query import QueryRequest, QueryResponse
 from app.security.service_jwt import ServiceIdentity
 from app.services.conversation import (
     ConversationManager,
     ConversationStoreUnavailableError,
+    InvalidConversationRoleError,
 )
 from app.services.evaluation import (
     BatchTooLargeError,
@@ -69,9 +76,9 @@ from app.services.evaluation import (
     EvaluationPersistenceError,
     EvaluationPipeline,
 )
-from app.services.llm_generator import LLMGenerator, LLMUnavailableError
+from app.services.llm_generator import LLMGenerator, LLMUnavailableError, StreamDelta
 from app.services.metrics import MetricsCollector
-from app.services.rag_service import RAGService
+from app.services.rag_service import RAGService, RAGServiceResult
 from app.services.response_assembly import assemble_query_response
 from app.services.vector_store import (
     VectorStoreManager,
@@ -96,7 +103,10 @@ def post_query(
     request: QueryRequest,
     rag_service: RAGService = Depends(get_rag_service),
     metrics_collector: MetricsCollector = Depends(get_metrics_collector),
-    _identity: ServiceIdentity = Depends(require_query_identity),
+    # SECURITY HARDENING STAGE 1: composes the existing auth check with a
+    # new per-identity rate limit (app/api/rate_limit.py) -- this route
+    # drives a real LLM generation per call.
+    _identity: ServiceIdentity = Depends(rate_limited_query_identity),
 ) -> QueryResponse:
     """Answer `request.query`, auto-creating/resolving the session and
     resolving retrieval configuration exactly as `RAGService.handle_query()`
@@ -214,6 +224,117 @@ def post_query(
     return assemble_query_response(rag_result)
 
 
+@router.post("/api/v1/query/stream")
+def post_query_stream(
+    request: QueryRequest,
+    rag_service: RAGService = Depends(get_rag_service),
+    metrics_collector: MetricsCollector = Depends(get_metrics_collector),
+    # SECURITY HARDENING STAGE 1: see post_query's identical comment above.
+    _identity: ServiceIdentity = Depends(rate_limited_query_identity),
+) -> StreamingResponse:
+    """Stage 9B -- streaming counterpart to `POST /api/v1/query` above.
+
+    ADDITIVE ONLY: `post_query()` above is completely unmodified -- same
+    function, same behavior, same response model -- so every existing
+    caller (the evaluation pipeline, this project's own non-streaming
+    tests) is entirely unaffected. This is a separate route for callers
+    that want real, token-by-token delivery instead.
+
+    WIRE FORMAT: newline-delimited JSON (NDJSON), one object per line,
+    `Content-Type: application/x-ndjson`:
+        {"type": "delta", "text": "..."}  -- zero or more, in arrival order
+        {"type": "done", "answer": ..., "session_id": ..., "source_attributions": [...], "retrieval_metadata": {...}}
+            -- exactly one, always last on success (the exact same
+            `QueryResponse` shape `post_query()` returns as its whole
+            body, just delivered as the stream's final line instead)
+        {"type": "error", "detail": "..."} -- instead of "done", only if
+            generation itself fails after streaming has already started
+
+    STATUS-CODE HONESTY (a real, disclosed trade-off of streaming, not
+    an oversight): `RAGService.handle_query_stream()`'s own
+    PRE-generation work (session/history read, the casual-intent gate,
+    retrieval) runs SYNCHRONOUSLY as part of the call below, so a
+    `VectorStoreUnavailableError`/`ConversationStoreUnavailableError`
+    from that phase still maps to the EXACT SAME 503 `post_query()`
+    itself returns, BEFORE any 200/streaming response is ever committed
+    -- no regression for those failure classes. This route additionally
+    "primes" the returned event iterator by pulling exactly one item
+    from it before constructing the `StreamingResponse` (see the
+    `next(events, _NO_EVENTS)` call below): since `LLMGenerator.
+    generate_stream()`'s own first real work (opening the Ollama HTTP
+    connection) happens before its first `yield`, an Ollama that's
+    unreachable from the very start of a request is ALSO still caught
+    here and mapped to the same 503 `post_query()` would raise for an
+    `LLMUnavailableError` -- not merely an in-band error line. Only a
+    genuinely MID-generation failure (Ollama's connection drops after
+    some tokens were already produced) can no longer be reported as a
+    distinct HTTP status, because the 200 status is unavoidably already
+    committed to the client by that point -- this is an inherent
+    constraint of HTTP streaming (the same trade-off every streaming
+    LLM API makes), not something this route's own logic could avoid;
+    that one case is reported as an in-band `{"type": "error"}` line,
+    which Team 4C's client treats identically to this route's own 503.
+    """
+
+    start_time = time.monotonic()
+
+    try:
+        events: Iterator[StreamDelta | RAGServiceResult] = rag_service.handle_query_stream(
+            request.query,
+            workspace_id=_identity.workspace_id,
+            session_id=request.session_id,
+            retrieval_config=request.retrieval_config,
+        )
+        _NO_EVENTS = object()
+        first_event = next(events, _NO_EVENTS)
+    except VectorStoreUnavailableError as exc:
+        logger.exception("Vector store operation failed during streaming query handling")
+        raise HTTPException(status_code=503, detail="Vector store is currently unavailable.") from exc
+    except ConversationStoreUnavailableError as exc:
+        logger.exception("Conversation store operation failed during streaming query handling")
+        raise HTTPException(status_code=503, detail="Conversation store is currently unavailable.") from exc
+    except LLMUnavailableError as exc:
+        logger.exception("LLM generation failed during streaming query handling (before any output was sent)")
+        raise HTTPException(status_code=503, detail="Language model service is currently unavailable.") from exc
+
+    primed_events: Iterator[StreamDelta | RAGServiceResult] = (
+        iter(()) if first_event is _NO_EVENTS else itertools.chain([first_event], events)
+    )
+
+    def ndjson_lines() -> Iterator[str]:
+        succeeded = False
+        hit = False
+        try:
+            for event in primed_events:
+                if isinstance(event, RAGServiceResult):
+                    succeeded = True
+                    hit = event.retrieval_metadata.get("chunks_retrieved", 0) > 0
+                    payload = assemble_query_response(event)
+                    yield json.dumps({"type": "done", **payload.model_dump()}) + "\n"
+                else:
+                    yield json.dumps({"type": "delta", "text": event.text}) + "\n"
+        except LLMUnavailableError:
+            # Reached only for a MID-generation failure -- see this
+            # route's own docstring's "status-code honesty" note. The
+            # 200 status is already committed by this point; this is
+            # the one failure class that can only be reported in-band.
+            logger.exception("LLM generation failed during streaming query handling (mid-stream)")
+            yield json.dumps({"type": "error", "detail": "Language model service is currently unavailable."}) + "\n"
+        except Exception:  # noqa: BLE001 -- any other mid-stream failure is reported uniformly, never leaked raw
+            logger.exception("Unexpected error during streaming query handling (mid-stream)")
+            yield json.dumps({"type": "error", "detail": "An unexpected error occurred while processing the query."}) + "\n"
+        finally:
+            _record_query_metrics(
+                metrics_collector,
+                start_time,
+                succeeded=succeeded,
+                hit=hit,
+                error_type=None if succeeded else "stream_error",
+            )
+
+    return StreamingResponse(ndjson_lines(), media_type="application/x-ndjson")
+
+
 def _record_query_metrics(
     metrics_collector: MetricsCollector,
     start_time: float,
@@ -295,6 +416,7 @@ def get_session_history(
     conversation_manager: ConversationManager = Depends(
         get_conversation_manager
     ),
+    _identity: ServiceIdentity = Depends(require_query_identity),
 ) -> SessionHistoryResponse:
     """Return the complete stored conversation history for `session_id`,
     in original chronological order -- never the configured 5-turn
@@ -310,6 +432,15 @@ def get_session_history(
     operation), but the check is implemented as the philosophically
     correct one regardless, per the explicit instruction not to assume
     an empty result means the session exists.
+
+    STEP 2 REMEDIATION: previously the ONLY internal-service route with
+    no authentication at all -- gated by the same `require_query_identity`
+    JWT dependency as `/query` and `/seed` now, for the identical reason:
+    a conversation's full history (both the student's question and the
+    assistant's answer) is exactly as sensitive as the live query path
+    that produces it, and should never have been reachable by an
+    unauthenticated caller merely because that caller knows/guesses a
+    session_id.
     """
 
     try:
@@ -347,6 +478,145 @@ def get_session_history(
     )
 
 
+class SeedTurn(BaseModel):
+    """One historical turn a caller wants restored into a missing/expired
+    Redis session. `timestamp` is optional (unlike `HistoryTurn`, which
+    always echoes a real stored value back) -- a caller restoring from its
+    own durable store (Team 4C's MongoDB) has a real original timestamp to
+    supply and should; `None` falls back to `ConversationManager`'s own
+    clock, exactly like `append_turn`'s existing default.
+    """
+
+    role: str
+    content: str
+    timestamp: float | None = None
+
+
+class SeedSessionRequest(BaseModel):
+    """Request body for `POST /api/v1/sessions/{session_id}/seed`. `turns`
+    should be in chronological (oldest-first) order -- the same order
+    `append_turn` is called in, which is what determines the restored
+    session's actual ordering (Redis list append order, not the
+    `timestamp` field itself -- see `ConversationManager._read_range`).
+    """
+
+    turns: list[SeedTurn]
+
+
+class SeedSessionResponse(BaseModel):
+    """Response for the seed endpoint. `seeded=False` is an ordinary,
+    successful outcome (the session already existed, or a concurrent seed
+    was already in flight) -- not an error -- see
+    `ConversationManager.seed_history`'s own docstring.
+    """
+
+    session_id: str
+    seeded: bool
+    turn_count: int
+
+
+@router.post(
+    "/api/v1/sessions/{session_id}/seed",
+    response_model=SeedSessionResponse,
+)
+def post_seed_session(
+    session_id: str,
+    request: SeedSessionRequest,
+    conversation_manager: ConversationManager = Depends(get_conversation_manager),
+    _identity: ServiceIdentity = Depends(require_query_identity),
+) -> SeedSessionResponse:
+    """Restore a missing/expired Redis session from caller-supplied
+    history (Requirement 4/5's Redis TTL means a long-idle conversation's
+    context is otherwise silently lost -- Team 4C's MongoDB is the durable
+    system of record this restores FROM).
+
+    SECURITY: gated by the exact same internal-service-JWT dependency as
+    `POST /api/v1/query` (`require_query_identity`) -- this is
+    deliberately NOT a public/unauthenticated endpoint, unlike
+    `GET /sessions/{id}/history` above (a pre-existing, separate route
+    this task does not touch). Only a caller holding a valid, correctly-
+    scoped internal service JWT can seed a session.
+
+    IDEMPOTENT / CONCURRENCY-SAFE: delegates entirely to
+    `ConversationManager.seed_history()` (see its own docstring for the
+    Redis-lock mechanism) -- this route adds no locking, retry, or
+    session-existence logic of its own. Never duplicates turns into an
+    already-populated session, and is safe to call repeatedly or from
+    multiple concurrent requests for the same `session_id`.
+
+    Does not call `RAGService`, execute retrieval, or perform LLM
+    generation -- this is a pure history-restoration write, not a query.
+    """
+
+    try:
+        seeded = conversation_manager.seed_history(
+            session_id,
+            [(turn.role, turn.content, turn.timestamp) for turn in request.turns],  # type: ignore[misc]
+        )
+    except InvalidConversationRoleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ConversationStoreUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Conversation store is currently unavailable.",
+        ) from exc
+
+    return SeedSessionResponse(
+        session_id=session_id,
+        seeded=seeded,
+        turn_count=len(request.turns),
+    )
+
+
+class DeleteSessionResponse(BaseModel):
+    """STEP 3 REMEDIATION response for `DELETE /api/v1/sessions/{id}`.
+    `deleted=False` is an ordinary, successful outcome (there was no
+    session to delete) -- not an error -- mirroring `SeedSessionResponse`'s
+    own `seeded` field's same convention.
+    """
+
+    session_id: str
+    deleted: bool
+
+
+@router.delete(
+    "/api/v1/sessions/{session_id}",
+    response_model=DeleteSessionResponse,
+)
+def delete_session(
+    session_id: str,
+    conversation_manager: ConversationManager = Depends(get_conversation_manager),
+    _identity: ServiceIdentity = Depends(require_query_identity),
+) -> DeleteSessionResponse:
+    """STEP 3 REMEDIATION: delete `session_id`'s stored Redis history --
+    best-effort cleanup support for Team 4C deleting a Conversation (a
+    later stage wires the actual caller; this route is the Team 4B-side
+    primitive it will use).
+
+    SECURITY: gated by the same internal-service-JWT dependency as
+    `/query`/`/seed`/`/history` -- never a public/unauthenticated
+    endpoint.
+
+    Delegates entirely to `ConversationManager.delete_session()` (exact-
+    key deletion, see its own docstring) -- this route adds no filtering,
+    pattern, or bulk-delete logic of its own, and can only ever remove
+    the one named session. Deleting a session that doesn't exist is a
+    safe, ordinary no-op (`deleted: false`), not a 404 -- the caller's
+    own intent ("this session should not exist anymore") is already
+    satisfied either way.
+    """
+
+    try:
+        deleted = conversation_manager.delete_session(session_id)
+    except ConversationStoreUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Conversation store is currently unavailable.",
+        ) from exc
+
+    return DeleteSessionResponse(session_id=session_id, deleted=deleted)
+
+
 @router.post(
     "/api/v1/evaluate",
     response_model=EvaluationResponse,
@@ -356,11 +626,23 @@ def post_evaluate(
     evaluation_pipeline: EvaluationPipeline = Depends(
         get_evaluation_pipeline
     ),
+    _identity: ServiceIdentity = Depends(rate_limited_query_identity),
 ) -> EvaluationResponse:
     """ADDED IN TASK 9.1. Evaluate a batch of caller-supplied
     query/response/context triples via RAGAS (Requirement 8). Does NOT
     execute retrieval, generation, or any part of the normal RAG query
     path -- `items` are the complete, self-contained evaluation input.
+
+    SECURITY HARDENING STAGE 1: previously had NO authentication
+    dependency at all -- the only route in this file in that state.
+    Gated with the SAME `require_query_identity` every other route here
+    already uses, now composed with a rate limit too
+    (`rate_limited_query_identity`, app/api/rate_limit.py) since this
+    route can drive a real RAGAS/embedding batch per call (not a new
+    "evaluate" scope): this system has exactly
+    one internal-service scope for Team 4B ("query"), already shared by
+    `/query`, `/query/stream`, and every `/sessions/*` route, and nothing
+    about batch evaluation needs a narrower one.
 
     The request body is a raw JSON array (`list[EvaluationItem]`), not
     an envelope object -- neither official document describes an

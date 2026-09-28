@@ -9,15 +9,86 @@ temp-directory-backed `FileStorage`, injected via
 
 from __future__ import annotations
 
+import time
+
+import fakeredis
+import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import routes
+from app.api.auth_dependency import get_service_jwt_verifier
 from app.api.file_storage import FileStorage
 from app.api.job_store import InMemoryJobStore
-from app.api.routes import get_file_storage, get_job_store, router
+from app.api.routes import get_file_storage, get_ingestion_lock, get_job_store, router
 from app.config.settings import Settings, get_settings
+from app.pipeline.ingestion_lock import IngestionLock
+from app.security.service_jwt import ServiceJWTVerifier
+
+# Security Hardening Stage 1: every route in this file now requires the
+# same internal-service JWT as Team 4A's canonical /v1/ingest route (see
+# app/api/routes.py's own module docstring for why). Mirrors
+# test_canonical_ingest_route.py's own real-keypair, real-jwt.encode
+# discipline exactly -- never a mock of the JWT library or the verifier's
+# own logic.
+_ISSUER = "https://educopilot.internal"
+_AUDIENCE = "team4a-ingestion"
+_SCOPE = "ingest"
+_KID = "test-kid-1"
+
+
+def _generate_es256_keypair() -> tuple[str, str]:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    return private_pem, public_pem
+
+
+_PRIVATE_PEM, _PUBLIC_PEM = _generate_es256_keypair()
+_OTHER_PRIVATE_PEM, _ = _generate_es256_keypair()
+
+
+def mint_token(
+    *,
+    sub: str = "team4c-service",
+    workspace_id: str = "ws-1",
+    scope: str = _SCOPE,
+    issuer: str = _ISSUER,
+    audience: str = _AUDIENCE,
+    kid: str = _KID,
+    private_pem: str = _PRIVATE_PEM,
+    ttl_seconds: int = 300,
+    omit_claims: tuple[str, ...] = (),
+) -> str:
+    """Mints a real, signed internal-service JWT for these tests. Exported
+    (not `_mint`) since several test classes below need to mint their own
+    tokens for specific auth-failure scenarios, not just the shared
+    `client` fixture's default valid one."""
+
+    now = time.time()
+    claims = {
+        "sub": sub,
+        "workspace_id": workspace_id,
+        "scope": scope,
+        "iss": issuer,
+        "aud": audience,
+        "iat": int(now),
+        "exp": int(now + ttl_seconds),
+        "jti": "test-jti-1",
+    }
+    for claim in omit_claims:
+        claims.pop(claim, None)
+    return jwt.encode(claims, private_pem, algorithm="ES256", headers={"kid": kid})
 
 
 @pytest.fixture
@@ -47,13 +118,53 @@ def client(tmp_path, job_store) -> TestClient:
     # would correctly (but confusingly, for the test) refuse to touch it.
     app.dependency_overrides[get_settings] = lambda: test_settings
 
+    # Security Hardening Stage 1: a REAL verifier built from a real,
+    # test-generated key pair -- overriding `get_service_jwt_verifier`
+    # (not `require_ingest_identity` itself) so the actual verification
+    # logic still runs on every request, exactly matching
+    # test_canonical_ingest_route.py's own established discipline.
+    app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+        public_keys_by_kid={_KID: _PUBLIC_PEM},
+        expected_issuer=_ISSUER,
+        expected_audience=_AUDIENCE,
+        required_scope=_SCOPE,
+    )
+
     # NOTE: the actual Celery dispatch boundary (`process_pdf.delay` etc.)
     # is mocked project-wide, for every test regardless of which fixture
     # builds the FastAPI app -- see tests/conftest.py's autouse
     # `_mock_celery_dispatch` fixture and its own docstring for why this
     # had to be global rather than local to this fixture.
 
-    return TestClient(app)
+    # Every pre-existing test in this file predates Security Hardening
+    # Stage 1 and asserts real route BEHAVIOR (job creation, dispatch,
+    # pagination, etc.), not authentication itself -- so the shared
+    # client carries a real, valid, default token, matching
+    # test_canonical_ingest_route.py's own `_client()` convention. The
+    # dedicated `TestLegacyRoutesRequireAuthentication` class below
+    # builds its OWN client (without this default header) specifically
+    # to exercise the missing/invalid/wrong-scope cases.
+    #
+    # Stage 2 Part B: `get_ingestion_lock` is overridden with a REAL
+    # `IngestionLock` backed by a FRESH `fakeredis.FakeRedis()` instance
+    # -- isolated per test client, matching test_canonical_ingestion.py's
+    # own established convention. Without this, every test built via this
+    # fixture would share the SAME real Redis instance's dedup state
+    # (many of this file's own tests reuse the exact same default
+    # `pdf_upload()`/`video_upload()` bytes), so an unrelated LATER test
+    # would spuriously get rejected as a "duplicate" of an EARLIER,
+    # completely unrelated test's own upload.
+    #
+    # The lock instance is constructed ONCE here, outside the override
+    # lambda -- FastAPI calls a dependency_overrides lambda fresh on
+    # EVERY request, so a lambda that constructed `IngestionLock(...)`
+    # itself would hand each request its own empty fakeredis instance,
+    # silently defeating dedup across the two+ requests a single test
+    # makes against this one client (the same class of bug already seen
+    # with FakeRateLimiter in Security Hardening Stage 1).
+    ingestion_lock = IngestionLock(fakeredis.FakeRedis(decode_responses=True))
+    app.dependency_overrides[get_ingestion_lock] = lambda: ingestion_lock
+    return TestClient(app, headers={"Authorization": f"Bearer {mint_token()}"})
 
 
 def pdf_upload(content: bytes = b"%PDF-1.4 fake content", content_type: str = "application/pdf"):
@@ -294,8 +405,8 @@ def test_get_job_does_not_return_an_unrelated_job(client):
 
 
 def test_list_jobs_default_pagination(client):
-    for _ in range(3):
-        client.post("/ingest/pdf", files=pdf_upload())
+    for i in range(3):
+        client.post("/ingest/pdf", files=pdf_upload(content=f"%PDF-1.4 job number {i}".encode()))
 
     response = client.get("/jobs")
 
@@ -308,8 +419,8 @@ def test_list_jobs_default_pagination(client):
 
 
 def test_list_jobs_does_not_exceed_page_size(client):
-    for _ in range(5):
-        client.post("/ingest/pdf", files=pdf_upload())
+    for i in range(5):
+        client.post("/ingest/pdf", files=pdf_upload(content=f"%PDF-1.4 job number {i}".encode()))
 
     response = client.get("/jobs?page=1&page_size=2")
 
@@ -320,8 +431,8 @@ def test_list_jobs_does_not_exceed_page_size(client):
 
 def test_list_jobs_iterating_all_pages_yields_exactly_n_jobs_no_duplicates(client):
     created_ids = []
-    for _ in range(7):
-        response = client.post("/ingest/pdf", files=pdf_upload())
+    for i in range(7):
+        response = client.post("/ingest/pdf", files=pdf_upload(content=f"%PDF-1.4 job number {i}".encode()))
         created_ids.append(response.json()["job_id"])
 
     page_size = 3
@@ -370,8 +481,8 @@ def test_list_jobs_empty_store_returns_empty_list(client):
 
 
 def test_two_requests_receive_distinct_job_ids(client):
-    response_a = client.post("/ingest/pdf", files=pdf_upload())
-    response_b = client.post("/ingest/pdf", files=pdf_upload())
+    response_a = client.post("/ingest/pdf", files=pdf_upload(content=b"%PDF-1.4 job A"))
+    response_b = client.post("/ingest/pdf", files=pdf_upload(content=b"%PDF-1.4 job B"))
 
     assert response_a.json()["job_id"] != response_b.json()["job_id"]
 
@@ -575,3 +686,190 @@ def test_dispatch_failure_for_youtube_does_not_attempt_cleanup_of_a_nonexistent_
     all_jobs, total = job_store.list(page=1, page_size=10)
     assert total == 1
     assert all_jobs[0].status.value == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Security Hardening Stage 1 -- legacy routes now require the same
+# internal-service JWT as the canonical /v1/ingest route. `client` (this
+# file's shared fixture) already carries a valid default token, proven by
+# every test above still passing; the tests below build their OWN
+# unauthenticated/misauthenticated clients (never reusing `client`, which
+# would trivially pass) to prove each route genuinely rejects a caller
+# without one. The failure-mode matrix itself (expired/wrong-audience/
+# wrong-scope/unknown-kid/missing-claim) is exhaustively covered once,
+# against /ingest/pdf, mirroring test_canonical_ingest_route.py's own
+# structure -- `require_ingest_identity` is the exact same function object
+# on every route below, so repeating all nine failure modes five times
+# would test FastAPI's dependency wiring, not new behavior.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def unauthenticated_client(tmp_path, job_store) -> TestClient:
+    """The same app assembly as `client`, but with NO default
+    Authorization header and a REAL (not overridden) verifier -- proves
+    each route is actually wired to `require_ingest_identity`, not just
+    that the shared fixture's token happens to be accepted."""
+
+    app = FastAPI()
+    app.include_router(router)
+    test_settings = Settings(upload_directory=str(tmp_path), _env_file=None)
+    app.dependency_overrides[get_job_store] = lambda: job_store
+    app.dependency_overrides[get_file_storage] = lambda: FileStorage(settings=test_settings)
+    app.dependency_overrides[get_settings] = lambda: test_settings
+    app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+        public_keys_by_kid={_KID: _PUBLIC_PEM},
+        expected_issuer=_ISSUER,
+        expected_audience=_AUDIENCE,
+        required_scope=_SCOPE,
+    )
+    ingestion_lock = IngestionLock(fakeredis.FakeRedis(decode_responses=True))
+    app.dependency_overrides[get_ingestion_lock] = lambda: ingestion_lock
+    return TestClient(app)
+
+
+class TestLegacyRoutesRequireAuthentication:
+    def test_ingest_pdf_without_credentials_is_rejected(self, unauthenticated_client):
+        response = unauthenticated_client.post("/ingest/pdf", files=pdf_upload())
+        assert response.status_code == 401
+
+    def test_ingest_video_without_credentials_is_rejected(self, unauthenticated_client):
+        response = unauthenticated_client.post("/ingest/video", files=video_upload())
+        assert response.status_code == 401
+
+    def test_ingest_youtube_without_credentials_is_rejected(self, unauthenticated_client):
+        response = unauthenticated_client.post(
+            "/ingest/youtube", json={"url": "https://www.youtube.com/watch?v=abc123"}
+        )
+        assert response.status_code == 401
+
+    def test_get_job_without_credentials_is_rejected(self, unauthenticated_client):
+        response = unauthenticated_client.get("/jobs/some-job-id")
+        assert response.status_code == 401
+
+    def test_list_jobs_without_credentials_is_rejected(self, unauthenticated_client):
+        response = unauthenticated_client.get("/jobs")
+        assert response.status_code == 401
+
+    def test_no_job_is_created_when_authentication_is_missing(self, unauthenticated_client, job_store):
+        unauthenticated_client.post("/ingest/pdf", files=pdf_upload())
+        assert job_store.list(page=1, page_size=10)[1] == 0
+
+    def test_malformed_bearer_token_is_rejected(self, unauthenticated_client):
+        response = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": "Bearer not-a-real-jwt"}
+        )
+        assert response.status_code == 401
+
+    def test_expired_token_is_rejected(self, unauthenticated_client):
+        token = mint_token(ttl_seconds=-3600)
+        response = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 401
+
+    def test_wrong_audience_is_rejected(self, unauthenticated_client):
+        # A real token minted for a DIFFERENT internal service (Team 4B's
+        # query endpoint) must never be accepted here.
+        token = mint_token(audience="team4b-query")
+        response = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 401
+
+    def test_wrong_scope_is_rejected(self, unauthenticated_client):
+        token = mint_token(scope="query")
+        response = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 401
+
+    def test_unknown_kid_is_rejected(self, unauthenticated_client):
+        token = mint_token(kid="kid-does-not-exist")
+        response = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 401
+
+    def test_wrong_signing_key_is_rejected(self, unauthenticated_client):
+        # Signed with a real ES256 key, but not the one this verifier
+        # trusts -- proves signature verification itself is enforced, not
+        # just claim matching.
+        token = mint_token(private_pem=_OTHER_PRIVATE_PEM)
+        response = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 401
+
+    def test_token_missing_required_claim_is_rejected(self, unauthenticated_client):
+        token = mint_token(omit_claims=("sub",))
+        response = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 401
+
+    def test_valid_credentials_are_accepted_on_every_legacy_route(self, unauthenticated_client, job_store):
+        token = mint_token()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        pdf_response = unauthenticated_client.post("/ingest/pdf", files=pdf_upload(), headers=headers)
+        assert pdf_response.status_code == 202
+
+        video_response = unauthenticated_client.post("/ingest/video", files=video_upload(), headers=headers)
+        assert video_response.status_code == 202
+
+        youtube_response = unauthenticated_client.post(
+            "/ingest/youtube", json={"url": "https://www.youtube.com/watch?v=abc123"}, headers=headers
+        )
+        assert youtube_response.status_code == 202
+
+        list_response = unauthenticated_client.get("/jobs", headers=headers)
+        assert list_response.status_code == 200
+        assert list_response.json()["total"] == 3
+
+        job_id = pdf_response.json()["job_id"]
+        get_response = unauthenticated_client.get(f"/jobs/{job_id}", headers=headers)
+        assert get_response.status_code == 200
+
+    def test_auth_failure_response_does_not_leak_which_check_failed(self, unauthenticated_client):
+        """A wrong-audience token and a garbage token must be
+        indistinguishable to the caller (same status, same generic
+        detail) -- mirrors test_canonical_ingest_route.py's own
+        verification-oracle-avoidance test for the identical shared
+        dependency."""
+
+        wrong_audience = unauthenticated_client.post(
+            "/ingest/pdf",
+            files=pdf_upload(),
+            headers={"Authorization": f"Bearer {mint_token(audience='team4b-query')}"},
+        )
+        garbage = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": "Bearer garbage"}
+        )
+        assert wrong_audience.status_code == garbage.status_code == 401
+        assert wrong_audience.json()["detail"] == garbage.json()["detail"]
+
+    def test_documented_limitation_a_valid_token_can_read_any_job_regardless_of_which_identity_created_it(
+        self, unauthenticated_client
+    ):
+        """Locks in the KNOWN LIMITATION documented in routes.py's own
+        module docstring: IngestionJob carries no workspace_id/user_id at
+        all, so this authentication fix (Security Hardening Stage 1)
+        controls WHO may call these routes, but cannot enforce
+        per-resource ownership -- a second, differently-identified valid
+        token can still read a job a first token's request created. This
+        test exists so that gap stays visible and intentional rather than
+        silently assumed fixed by a future reader of the auth tests
+        above."""
+
+        creator_token = mint_token(sub="team4c-service-a", workspace_id="ws-a")
+        created = unauthenticated_client.post(
+            "/ingest/pdf", files=pdf_upload(), headers={"Authorization": f"Bearer {creator_token}"}
+        )
+        job_id = created.json()["job_id"]
+
+        other_token = mint_token(sub="team4c-service-b", workspace_id="ws-b")
+        read_by_other = unauthenticated_client.get(
+            f"/jobs/{job_id}", headers={"Authorization": f"Bearer {other_token}"}
+        )
+        assert read_by_other.status_code == 200

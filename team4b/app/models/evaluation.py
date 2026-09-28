@@ -48,16 +48,38 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+#: Security Hardening Stage 1 -- none of these three fields had any
+#: length bound at all before this change, so an unauthenticated (now
+#: fixed separately) or authenticated-but-abusive caller could submit an
+#: arbitrarily large payload straight into a real RAGAS/LLM/embedding
+#: call. Generous, not tight: `_MAX_QUERY_LENGTH` matches
+#: `app.models.query.QueryRequest.query`'s own new limit (the same kind
+#: of "one real question" field); `_MAX_CONTEXT_LENGTH` is sized for a
+#: genuinely long retrieved chunk or generated answer, not a short
+#: message.
+_MAX_QUERY_LENGTH = 4000
+_MAX_RESPONSE_LENGTH = 20_000
+_MAX_CONTEXT_LENGTH = 20_000
+_MAX_CONTEXTS_PER_ITEM = 50
 
 
 class EvaluationItem(BaseModel):
     """One query/response/context triple to evaluate. Exactly the
     official Requirement 8 input shape -- nothing more."""
 
-    query: str
-    response: str
-    contexts: list[str]
+    query: str = Field(min_length=1, max_length=_MAX_QUERY_LENGTH)
+    response: str = Field(min_length=1, max_length=_MAX_RESPONSE_LENGTH)
+    contexts: list[str] = Field(max_length=_MAX_CONTEXTS_PER_ITEM)
+
+    @field_validator("contexts")
+    @classmethod
+    def _each_context_within_length_limit(cls, value: list[str]) -> list[str]:
+        for context in value:
+            if len(context) > _MAX_CONTEXT_LENGTH:
+                raise ValueError(f"each context string must be {_MAX_CONTEXT_LENGTH} characters or fewer")
+        return value
 
 
 class EvaluationMetrics(BaseModel):

@@ -54,7 +54,7 @@ export const realTeamA: TeamAService = {
     });
 
     if (!response.ok) {
-      throw new Error(`Team A submit failed with status ${response.status}`);
+      throw new TeamASubmitError(response.status);
     }
 
     const body = await response.json();
@@ -78,6 +78,16 @@ export const realTeamA: TeamAService = {
     return { status: "ready", error: null };
   },
 };
+
+/** Carries the real HTTP status from a failed Team A `/v1/ingest` call, so
+ * callers (lib/ingestion.ts's `describeIngestionFailure()`) can map it to a
+ * safe, user-facing message without this client inventing its own error
+ * taxonomy — mirrors services/teamB/client.ts's existing `TeamBQueryError`. */
+export class TeamASubmitError extends Error {
+  constructor(public readonly status: number) {
+    super(`Team A submit failed with status ${status}`);
+  }
+}
 
 function requireUrl(): string {
   const url = process.env.TEAM_A_API_URL;

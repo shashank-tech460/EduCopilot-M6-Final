@@ -15,7 +15,7 @@ depends on. No network calls, no live Qdrant server required.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 from qdrant_client.models import ScoredPoint
 
@@ -204,9 +204,11 @@ class FakeRedisClient:
     def __init__(self, fail_times: dict[str, int] | None = None, ping_result: bool = True) -> None:
         self._lists: dict[str, list[str]] = {}
         self._ttls: dict[str, int] = {}
+        self._strings: dict[str, str] = {}
         self._fail_times = dict(fail_times or {})
         self._ping_result = ping_result
         self.expire_calls: list[tuple[str, int]] = []
+        self.set_calls: list[tuple[str, str, bool, int | None]] = []
 
     def _maybe_fail(self, method: str) -> None:
         remaining = self._fail_times.get(method, 0)
@@ -256,6 +258,31 @@ class FakeRedisClient:
     def pipeline(self, transaction: bool = True) -> FakeRedisPipeline:
         return FakeRedisPipeline(self)
 
+    def set(self, name: str, value: str, *, nx: bool = False, ex: int | None = None) -> bool:
+        # Genuine `SET NX` semantics (not just call-recording) -- the
+        # restoration lock's correctness (ConversationManager.seed_history)
+        # depends on this actually refusing to overwrite an existing key
+        # when nx=True, exactly like real Redis.
+        self._maybe_fail("set")
+        self.set_calls.append((name, value, nx, ex))
+        if nx and name in self._strings:
+            return False
+        self._strings[name] = value
+        return True
+
+    def delete(self, *names: str) -> int:
+        self._maybe_fail("delete")
+        deleted = 0
+        for name in names:
+            if name in self._strings:
+                del self._strings[name]
+                deleted += 1
+            if name in self._lists:
+                del self._lists[name]
+                self._ttls.pop(name, None)
+                deleted += 1
+        return deleted
+
     # -- test-only introspection helpers ------------------------------------
 
     def ttl_for(self, name: str) -> int | None:
@@ -304,22 +331,84 @@ class FakeLLMClient:
         fail_times: int = 0,
         raise_error: Exception | None = None,
         health_result: bool = True,
+        stream_fragments: list[str] | None = None,
+        stream_raise_after: int | None = None,
     ) -> None:
         self.response = response
         self._fail_times = fail_times
         self._raise_error = raise_error
         self._health_result = health_result
+        # Stage 9B: `generate_stream()`'s own configuration. Defaults to
+        # yielding `response` as a SINGLE fragment (the simplest possible
+        # streaming behavior) -- pass `stream_fragments` explicitly to
+        # simulate real chunked delivery (e.g. splitting a JSON response
+        # into small pieces, to exercise `_IncrementalAnswerExtractor`'s
+        # own fragment-boundary handling). `stream_raise_after` simulates
+        # a connection failure partway through an in-progress stream,
+        # after that many fragments have already been yielded.
+        self._stream_fragments = stream_fragments
+        self._stream_raise_after = stream_raise_after
         self.calls: list[dict[str, Any]] = []
+        self.stream_calls: list[dict[str, Any]] = []
         self.check_health_calls: int = 0
 
-    def generate(self, model: str, prompt: str, timeout: float, *, num_gpu: int | None = None, num_predict: int | None = None) -> str:
-        self.calls.append({"model": model, "prompt": prompt, "timeout": timeout, "num_gpu": num_gpu, "num_predict": num_predict})
+    def generate(
+        self,
+        model: str,
+        prompt: str,
+        timeout: float,
+        *,
+        num_gpu: int | None = None,
+        num_predict: int | None = None,
+        format: dict[str, Any] | None = None,
+    ) -> str:
+        self.calls.append(
+            {
+                "model": model,
+                "prompt": prompt,
+                "timeout": timeout,
+                "num_gpu": num_gpu,
+                "num_predict": num_predict,
+                "format": format,
+            }
+        )
         if self._raise_error is not None:
             raise self._raise_error
         if self._fail_times > 0:
             self._fail_times -= 1
             raise ConnectionError("simulated transient Ollama failure")
         return self.response
+
+    def generate_stream(
+        self,
+        model: str,
+        prompt: str,
+        timeout: float,
+        *,
+        num_gpu: int | None = None,
+        num_predict: int | None = None,
+        format: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
+        self.stream_calls.append(
+            {
+                "model": model,
+                "prompt": prompt,
+                "timeout": timeout,
+                "num_gpu": num_gpu,
+                "num_predict": num_predict,
+                "format": format,
+            }
+        )
+        if self._raise_error is not None:
+            raise self._raise_error
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise ConnectionError("simulated transient Ollama failure")
+        fragments = self._stream_fragments if self._stream_fragments is not None else [self.response]
+        for index, fragment in enumerate(fragments):
+            if self._stream_raise_after is not None and index >= self._stream_raise_after:
+                raise ConnectionError("simulated mid-stream Ollama failure")
+            yield fragment
 
     def check_health(self) -> bool:
         # ADDED IN TASK 10.1. Independent of `generate()`'s own
@@ -401,3 +490,31 @@ class FakeRagasEvaluator:
                 metrics_dict, errors = dict(self.default_metrics), dict(self.default_errors)
             results.append((EvaluationMetrics(**metrics_dict), errors))
         return results
+
+
+class FakeRateLimiter:
+    """Security Hardening Stage 1 -- stands in for `RedisRateLimiter`
+    (app/api/rate_limit.py) in tests that exercise `/api/v1/query`,
+    `/api/v1/query/stream`, or `/api/v1/evaluate` for reasons OTHER than
+    rate limiting itself. Permits every call by default (never touches a
+    real Redis instance): without this, this suite's ~1400 tests --
+    nearly all reusing the same fixed test JWT identity via
+    `tests/test_api.py`'s own `_client()` helper -- would collectively
+    exceed any real rate limit within one test run, failing unrelated
+    tests with 429s that have nothing to do with what they're actually
+    testing. Set `raise_after` to simulate the limit being hit on a
+    specific call number, for tests that DO exercise rate-limiting
+    behavior itself.
+    """
+
+    def __init__(self, raise_after: int | None = None, retry_after_seconds: int = 30) -> None:
+        self._raise_after = raise_after
+        self._retry_after_seconds = retry_after_seconds
+        self.calls: list[str] = []
+
+    def check(self, identity_key: str) -> None:
+        from app.api.rate_limit import RateLimitExceededError
+
+        self.calls.append(identity_key)
+        if self._raise_after is not None and len(self.calls) > self._raise_after:
+            raise RateLimitExceededError(retry_after_seconds=self._retry_after_seconds)

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { useQueryClient } from "@tanstack/react-query";
+import { DefaultChatTransport, type UIMessage } from "ai";
 
 import { useAppStore, type SourceAttribution, type QueuedChatMessage } from "@/store/appStore";
 import { isOffline, isNetworkError, flushOfflineQueue } from "@/components/chat/OfflineQueue";
@@ -37,8 +38,59 @@ import { isOffline, isNetworkError, flushOfflineQueue } from "@/components/chat/
  *      (`isNetworkError`) queues the message that was just attempted; an
  *      application error (401/404/500/etc.) falls through to the
  *      existing, unchanged `setMessageError` inline-error path.
+ *
+ * Persistent chat history (Step 6): passing `id: conversationId` to
+ * `useChat()` is the AI SDK's own documented mechanism for this exact
+ * scenario — verified directly in node_modules/@ai-sdk/react/dist/index.js
+ * before relying on it: `useChat()` recreates its internal `Chat` instance
+ * whenever the `id` option changes (`shouldRecreateChat`), and every
+ * update from the previous instance is identity-checked and ignored by
+ * the subscription that drives `messages` (`messagesSnapshotRef.current
+ * .chat !== chat`). This is what makes "switch to a different
+ * conversation" and "New Chat" (a new conversationId) correctly show a
+ * clean message list — no manual `key`-remount of ChatPanel is needed —
+ * and what prevents a still-in-flight stream from the PREVIOUS
+ * conversation from ever rendering into the NEWLY selected one. Message
+ * PERSISTENCE is unaffected either way: app/api/chat/route.ts already
+ * writes both turns to Mongo using the conversationId captured in the
+ * request body at send time, before the streaming loop even starts, not
+ * something read from client state after the fact — switching
+ * conversations mid-stream cannot save a message under the wrong one.
+ *
+ * `initialMessages` (from `hooks/useConversationMessages.ts`) seeds a
+ * resumed conversation's saved history. It is `undefined` while that
+ * fetch is still loading — distinct from `[]` (loaded, genuinely empty) —
+ * and is applied via `setMessages()` exactly once per conversationId
+ * (`seededForRef` below), so it never clobbers messages the user has
+ * already sent in the current conversation after the initial seed.
+ *
+ * STUCK-STREAM WATCHDOG (MVP polish pass): confirmed via live
+ * investigation that a Next.js dev-server Hot Module Reload / Fast
+ * Refresh remount occurring while a response is streaming leaves
+ * `useChat()`'s internal `Chat` instance permanently in `status ===
+ * "streaming"` — Team4B's own server logs show the request completing
+ * successfully and the answer being generated, but the UI never receives
+ * it and stays on "Thinking…" forever, with no error and no way to send
+ * another message (`submitMessage` refuses while `isStreaming`). This is
+ * a dev-mode-only trigger (Fast Refresh does not exist in a production
+ * build) but leaves the app completely stuck when it happens, so this
+ * adds a client-only recovery: if streaming is still ongoing after
+ * `STUCK_STREAM_TIMEOUT_MS` (set well above the worst real generation
+ * time this project has measured, including a cold Ollama model load),
+ * the current `Chat` instance is abandoned by changing `useChat()`'s
+ * `id` (the SDK's own documented mechanism for creating a fresh
+ * instance — see the `id` option below) and the conversation's last
+ * known-good saved history is re-seeded into it, so the UI returns to a
+ * normal, usable state instead of staying stuck. The orphaned request
+ * was never persisted (confirmed: Team4B never received a save call for
+ * it), so nothing is lost beyond the one attempt the user can simply
+ * retry.
  */
-export function useChatStream(workspaceId: string, conversationId: string | null) {
+export function useChatStream(
+  workspaceId: string,
+  conversationId: string | null,
+  initialMessages: UIMessage[] | undefined
+) {
   // MVP M5 correction: `conversationId` is `null` only while
   // `useActiveConversation` (hooks/useActiveConversation.ts) is still
   // establishing/creating the active Conversation for `workspaceId` --
@@ -47,7 +99,20 @@ export function useChatStream(workspaceId: string, conversationId: string | null
   // Tracks the text of the most recent submitAttempt so onError (which
   // only receives the Error, not the original request) can queue the
   // right message if it turns out to be a network failure.
+  // Stage 6 — invalidates the SAME sidebar list query key
+  // (`["conversations", workspaceId]`) that `ConversationSidebar.tsx`'s
+  // own delete flow already invalidates, reusing that established
+  // pattern rather than introducing a second one. This is what makes a
+  // freshly auto-generated title (app/api/chat/route.ts) — and this
+  // conversation's reordering to the top via its bumped `updatedAt` —
+  // show up in the sidebar without a manual reload.
+  const queryClient = useQueryClient();
   const lastAttemptedTextRef = useRef<string | null>(null);
+  // Persistent chat history (Step 6) — which conversationId's
+  // `initialMessages` have already been applied via setMessages(), so the
+  // seeding effect below runs at most once per conversation. See that
+  // effect for the full reasoning.
+  const seededForRef = useRef<string | null>(null);
   // Resolves the in-flight flush-loop's per-item promise from onFinish/
   // onError — lets flushOfflineQueue await one queued item fully
   // completing before sending the next (Property 17's FIFO + no-duplicate
@@ -65,8 +130,28 @@ export function useChatStream(workspaceId: string, conversationId: string | null
   // request was still in flight. `null` means "the send currently in
   // flight (if any) is a normal, non-replay submitMessage() call."
   const replayingItemRef = useRef<QueuedChatMessage | null>(null);
+  // Stuck-stream watchdog: bumped to force useChat() to construct a
+  // fresh Chat instance, abandoning one whose stream got orphaned by a
+  // dev-server Fast Refresh remount (see module docstring). Included in
+  // `id` below rather than replacing it, so a genuine conversation
+  // switch is unaffected.
+  const [streamGeneration, setStreamGeneration] = useState(0);
+  const [timedOut, setTimedOut] = useState(false);
 
-  const { messages, sendMessage, status, error, regenerate, clearError } = useChat({
+  const { messages, sendMessage, status, error, regenerate, clearError, setMessages } = useChat({
+    // A fixed sentinel, never a real conversationId (those are Mongo
+    // ObjectId hex strings) — the AI SDK's `shouldRecreateChat` check
+    // specifically requires `options.id != null` to trigger recreation,
+    // so passing `undefined` while a brand-new conversation is still
+    // being created (conversationId briefly null — New Chat, or the very
+    // first workspace visit) would NOT reset the chat instance, leaving
+    // the previous conversation's messages visible until the new
+    // conversationId arrives. The sentinel makes every transition INTO
+    // and OUT OF the "creating" state its own distinct id, so New Chat
+    // clears the visible list immediately on click, not only once
+    // creation finishes. `streamGeneration` is appended so the stuck-
+    // stream watchdog can force recreation without changing conversation.
+    id: `${conversationId ?? "pending-new-conversation"}#${streamGeneration}`,
     transport: new DefaultChatTransport({
       api: "/api/chat",
       body: () => {
@@ -100,12 +185,21 @@ export function useChatStream(workspaceId: string, conversationId: string | null
         status: "complete",
       });
       useAppStore.getState().setStreaming(false);
+      // Stage 6 — refreshes the sidebar list so a first-message title
+      // update (or this conversation's reordering to the top) appears
+      // without a manual reload. Not conditioned on this being the
+      // FIRST message -- an unconditional, cheap cache invalidation
+      // (not a forced refetch) after every completed turn, matching the
+      // existing delete-flow's own invalidation call exactly.
+      void queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
       replayingItemRef.current = null;
       flushResolveRef.current?.(true);
       flushResolveRef.current = null;
+      setTimedOut(false);
     },
     onError: (err) => {
       useAppStore.getState().setStreaming(false);
+      setTimedOut(false);
 
       if (isNetworkError(err)) {
         const replayingItem = replayingItemRef.current;
@@ -165,6 +259,43 @@ export function useChatStream(workspaceId: string, conversationId: string | null
     useAppStore.getState().setStreaming(isStreaming);
   }, [isStreaming]);
 
+  // Stuck-stream watchdog — see module docstring. 4 minutes is set well
+  // above the worst real generation time measured for this project's
+  // local CPU-only Ollama setup (including a cold model load), so this
+  // only ever fires for a genuinely orphaned stream, never a slow-but-
+  // healthy one.
+  const STUCK_STREAM_TIMEOUT_MS = 240_000;
+  useEffect(() => {
+    if (!isStreaming) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      seededForRef.current = null;
+      setStreamGeneration((generation) => generation + 1);
+      useAppStore.getState().setStreaming(false);
+      setTimedOut(true);
+    }, STUCK_STREAM_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [isStreaming]);
+
+  // Persistent chat history (Step 6) — seeds a resumed conversation's
+  // saved messages exactly once per conversationId. `seededForRef` (not a
+  // plain boolean) is what makes "once per conversation" correct across a
+  // conversation switch: `initialMessages` legitimately becomes available
+  // again for a NEW conversationId, and must be applied again for that
+  // new id, but must never re-apply for the SAME id after the user has
+  // since sent a message in it (which would wipe out what they just
+  // sent). `initialMessages === undefined` means "still loading" (see
+  // hooks/useConversationMessages.ts) and is deliberately not treated the
+  // same as `[]` ("loaded, genuinely empty") — seeding only happens once
+  // the real answer is known, never speculatively.
+  useEffect(() => {
+    if (initialMessages !== undefined && conversationId && seededForRef.current !== conversationId) {
+      setMessages(initialMessages);
+      seededForRef.current = conversationId;
+    }
+  }, [initialMessages, conversationId, setMessages]);
+
   // Requirement 8.2 — automatically retry queued messages when
   // connectivity is restored. The browser's native "online" event, not
   // polling — navigator.onLine is only checked reactively here, never
@@ -223,6 +354,7 @@ export function useChatStream(workspaceId: string, conversationId: string | null
 
     lastAttemptedTextRef.current = text;
     replayingItemRef.current = null;
+    setTimedOut(false);
     sendMessage({ text });
   }
 
@@ -237,6 +369,7 @@ export function useChatStream(workspaceId: string, conversationId: string | null
     isStreaming,
     error,
     retry,
+    timedOut,
     offlineQueue: useAppStore((state) => state.chat.offlineQueue),
   };
 }

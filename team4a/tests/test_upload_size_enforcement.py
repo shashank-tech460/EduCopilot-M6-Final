@@ -51,11 +51,39 @@ from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, given, settings as hyp_settings
 from hypothesis import strategies as st
 
+from app.api.auth_dependency import get_service_jwt_verifier
 from app.api.file_storage import FileStorage
 from app.api.job_store import InMemoryJobStore
 from app.api.routes import get_file_storage, get_job_store, get_settings, router
 from app.config.settings import Settings
 from app.models.exceptions import UploadTooLargeError
+from app.security.service_jwt import ServiceJWTVerifier
+from tests.test_api_routes import _AUDIENCE, _ISSUER, _KID, _PUBLIC_PEM, _SCOPE, mint_token
+
+
+def _authenticated_client(app: FastAPI) -> TestClient:
+    """Shared helper for this file's several standalone `TestClient`
+    constructions (Security Hardening Stage 1: these routes now require
+    an internal service JWT -- see app/api/routes.py's own module
+    docstring)."""
+
+    app.dependency_overrides[get_service_jwt_verifier] = lambda: ServiceJWTVerifier(
+        public_keys_by_kid={_KID: _PUBLIC_PEM},
+        expected_issuer=_ISSUER,
+        expected_audience=_AUDIENCE,
+        required_scope=_SCOPE,
+    )
+    # Stage 2 Part B: isolated per-test fakeredis instance -- see
+    # test_api_routes.py's own client fixture for the full rationale;
+    # several tests sharing this helper upload identical default bytes.
+    import fakeredis
+
+    from app.api.routes import get_ingestion_lock
+    from app.pipeline.ingestion_lock import IngestionLock
+
+    ingestion_lock = IngestionLock(fakeredis.FakeRedis(decode_responses=True))
+    app.dependency_overrides[get_ingestion_lock] = lambda: ingestion_lock
+    return TestClient(app, headers={"Authorization": f"Bearer {mint_token()}"})
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +281,7 @@ def small_limit_client(small_limit_settings) -> TestClient:
     app.dependency_overrides[get_file_storage] = lambda: FileStorage(settings=small_limit_settings)
     app.dependency_overrides[get_settings] = lambda: small_limit_settings  # also drives max_bytes in the route
 
-    client = TestClient(app)
+    client = _authenticated_client(app)
     client.job_store = job_store  # type: ignore[attr-defined]
     return client
 
@@ -356,7 +384,7 @@ def test_route_video_upload_above_limit_rejected_no_job_no_file(tmp_path):
     app.dependency_overrides[get_job_store] = lambda: job_store
     app.dependency_overrides[get_file_storage] = lambda: FileStorage(settings=settings)
     app.dependency_overrides[get_settings] = lambda: settings
-    client = TestClient(app)
+    client = _authenticated_client(app)
 
     # Well within 1GB -- must succeed, proving the video path is wired
     # through the same enforcement without being accidentally more/less
@@ -374,7 +402,7 @@ def test_route_video_upload_declared_oversized_content_length_rejected(tmp_path)
     app.dependency_overrides[get_job_store] = lambda: job_store
     app.dependency_overrides[get_file_storage] = lambda: FileStorage(settings=settings)
     app.dependency_overrides[get_settings] = lambda: settings
-    client = TestClient(app)
+    client = _authenticated_client(app)
 
     boundary = "videolie"
     small_body = b"x" * 100

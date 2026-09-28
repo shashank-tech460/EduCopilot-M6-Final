@@ -1,0 +1,114 @@
+<svg width="1920" height="1080" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg">
+<rect x="0" y="0" width="1920" height="1080" fill="#f7f8fb"/>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#4b5468"/>
+</marker>
+<marker id="arrowGreen" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#12734f"/>
+</marker>
+<marker id="arrowPurple" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#5e35b4"/>
+</marker>
+<marker id="arrowBlue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#2255c4"/>
+</marker>
+</defs>
+<text x="48.0" y="50.0" font-family="'Segoe UI', Arial, sans-serif" font-size="32" font-weight="800" fill="#1b2130" text-anchor="start">EDUCOPILOT M6 — COMPLETE SYSTEM ARCHITECTURE</text>
+<text x="48.0" y="76.0" font-family="'Segoe UI', Arial, sans-serif" font-size="15" font-weight="400" fill="#7a8296" text-anchor="start">Team 4A (Ingestion)  ·  Team 4B (Retrieval / Generation)  ·  Team 4C (Application)</text>
+<rect x="1442.0" y="26.0" width="430.0" height="168.0" rx="10" fill="#ffffff" stroke="#e3e6ec" stroke-width="1.3"/>
+<text x="1460.0" y="50.0" font-family="'Segoe UI', Arial, sans-serif" font-size="14" font-weight="800" fill="#1b2130" text-anchor="start">REQUEST FLOW REFERENCE</text>
+<circle cx="1472.0" cy="74.0" r="11" fill="#2255c4"/>
+<text x="1472.0" y="77.8" font-family="'Segoe UI', Arial, sans-serif" font-size="10.45" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+<text x="1492.0" y="79.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="700" fill="#1b2130" text-anchor="start">Sign in</text>
+<circle cx="1472.0" cy="102.0" r="11" fill="#12734f"/>
+<text x="1472.0" y="105.8" font-family="'Segoe UI', Arial, sans-serif" font-size="10.45" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+<text x="1492.0" y="107.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="700" fill="#1b2130" text-anchor="start">Upload material -&gt; Team4A -&gt; Qdrant</text>
+<circle cx="1472.0" cy="130.0" r="11" fill="#5e35b4"/>
+<text x="1472.0" y="133.8" font-family="'Segoe UI', Arial, sans-serif" font-size="10.45" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<text x="1492.0" y="135.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="700" fill="#1b2130" text-anchor="start">Ask question -&gt; Team4B -&gt; Ollama</text>
+<circle cx="1472.0" cy="158.0" r="11" fill="#5e35b4"/>
+<text x="1472.0" y="161.8" font-family="'Segoe UI', Arial, sans-serif" font-size="10.45" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+<text x="1492.0" y="163.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="700" fill="#1b2130" text-anchor="start">Answer streamed back, with citations</text>
+<rect x="158.0" y="96.0" width="260.0" height="46.0" rx="23" fill="#ffffff" stroke="#c7cddb" stroke-width="1.3"/>
+<text x="288.0" y="125.0" font-family="'Segoe UI', Arial, sans-serif" font-size="14" font-weight="700" fill="#1b2130" text-anchor="middle">STUDENT — WEB BROWSER</text>
+<line x1="288.0" y1="142.0" x2="288.0" y2="204.0" stroke="#4b5468" stroke-width="1.7" marker-end="url(#arrow)"/>
+<rect x="48.0" y="210.0" width="1824.0" height="330.0" rx="16" fill="#eef1fc" stroke="#c3cdf3" stroke-width="1.8"/>
+<text x="74.0" y="250.0" font-family="'Segoe UI', Arial, sans-serif" font-size="20" font-weight="800" fill="#26339e" text-anchor="start">TEAM 4C — APPLICATION</text>
+<text x="74.0" y="274.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="400" fill="#7a8296" text-anchor="start">Next.js 16 · React 19 · TypeScript · port 3000</text>
+<rect x="74.0" y="306.0" width="338.4" height="92.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="243.2" y="328.0" font-family="'Segoe UI', Arial, sans-serif" font-size="15" font-weight="700" fill="#1b2130" text-anchor="middle">Authentication</text>
+<text x="243.2" y="344.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.5" font-weight="400" fill="#7a8296" text-anchor="middle">Auth.js credentials, bcrypt</text>
+<circle cx="398.4" cy="320.0" r="10" fill="#2255c4"/>
+<text x="398.4" y="323.5" font-family="'Segoe UI', Arial, sans-serif" font-size="9.5" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+<rect x="432.4" y="306.0" width="338.4" height="92.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="601.6" y="328.0" font-family="'Segoe UI', Arial, sans-serif" font-size="15" font-weight="700" fill="#1b2130" text-anchor="middle">Workspaces</text>
+<text x="601.6" y="344.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.5" font-weight="400" fill="#7a8296" text-anchor="middle">Create, switch, isolate by owner</text>
+<rect x="790.8" y="306.0" width="338.4" height="92.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="960.0" y="328.0" font-family="'Segoe UI', Arial, sans-serif" font-size="15" font-weight="700" fill="#1b2130" text-anchor="middle">Materials</text>
+<text x="960.0" y="344.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.5" font-weight="400" fill="#7a8296" text-anchor="middle">Upload PDF / video, add YouTube link</text>
+<circle cx="1115.2" cy="320.0" r="10" fill="#12734f"/>
+<text x="1115.2" y="323.5" font-family="'Segoe UI', Arial, sans-serif" font-size="9.5" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+<rect x="1149.2" y="306.0" width="338.4" height="92.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="1318.4" y="328.0" font-family="'Segoe UI', Arial, sans-serif" font-size="15" font-weight="700" fill="#1b2130" text-anchor="middle">AI Tutor Chat</text>
+<text x="1318.4" y="344.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.5" font-weight="400" fill="#7a8296" text-anchor="middle">Streaming answers with citations</text>
+<circle cx="1473.6" cy="320.0" r="10" fill="#5e35b4"/>
+<text x="1473.6" y="323.5" font-family="'Segoe UI', Arial, sans-serif" font-size="9.5" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<rect x="1507.6" y="306.0" width="338.4" height="92.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="1676.8" y="328.0" font-family="'Segoe UI', Arial, sans-serif" font-size="15" font-weight="700" fill="#1b2130" text-anchor="middle">Conversations</text>
+<text x="1676.8" y="344.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.5" font-weight="400" fill="#7a8296" text-anchor="middle">Titles, delete, persist across reload</text>
+<rect x="74.0" y="422.0" width="1772.0" height="94.0" rx="10" fill="#fdf3f3" stroke="#e3a6a4" stroke-width="1.4" stroke-dasharray="7,5"/>
+<text x="92.0" y="452.0" font-family="'Segoe UI', Arial, sans-serif" font-size="14" font-weight="700" fill="#a83a38" text-anchor="start">PROTECTED ROUTES — session + ownership check required on every request</text>
+<text x="92.0" y="474.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#8a6a68" text-anchor="start">Workspaces, Materials, Chat, Conversations, File Serving APIs  ·  service calls to Team4A/4B carry a signed service JWT</text>
+<line x1="494.0" y1="540.0" x2="494.0" y2="596.0" stroke="#12734f" stroke-width="1.7" marker-end="url(#arrowGreen)"/>
+<text x="510.0" y="570.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="700" fill="#12734f" text-anchor="start">(2) POST /v1/ingest</text>
+<line x1="1426.0" y1="540.0" x2="1426.0" y2="596.0" stroke="#5e35b4" stroke-width="1.7" marker-end="url(#arrowPurple)"/>
+<text x="1442.0" y="570.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="700" fill="#5e35b4" text-anchor="start">(3) POST /api/v1/query[/stream]</text>
+<rect x="48.0" y="596.0" width="892.0" height="300.0" rx="16" fill="#e6f6ee" stroke="#a4ddc0" stroke-width="1.8"/>
+<text x="74.0" y="634.0" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="800" fill="#12734f" text-anchor="start">TEAM 4A — MATERIAL PROCESSING</text>
+<text x="74.0" y="656.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#7a8296" text-anchor="start">FastAPI · port 8001 · service-JWT protected</text>
+<rect x="74.0" y="680.0" width="196.5" height="62.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="172.2" y="702.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="700" fill="#1b2130" text-anchor="middle">Source Processor</text>
+<line x1="270.5" y1="711.0" x2="288.5" y2="711.0" stroke="#12734f" stroke-width="1.7" marker-end="url(#arrowGreen)"/>
+<rect x="288.5" y="680.0" width="196.5" height="62.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="386.8" y="702.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="700" fill="#1b2130" text-anchor="middle">Chunker</text>
+<line x1="485.0" y1="711.0" x2="503.0" y2="711.0" stroke="#12734f" stroke-width="1.7" marker-end="url(#arrowGreen)"/>
+<rect x="503.0" y="680.0" width="196.5" height="62.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="601.2" y="702.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="700" fill="#1b2130" text-anchor="middle">Embedder</text>
+<line x1="699.5" y1="711.0" x2="717.5" y2="711.0" stroke="#12734f" stroke-width="1.7" marker-end="url(#arrowGreen)"/>
+<rect x="717.5" y="680.0" width="196.5" height="62.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="815.8" y="702.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="700" fill="#1b2130" text-anchor="middle">Publisher</text>
+<rect x="74.0" y="760.0" width="840.0" height="58.0" rx="8" fill="#ffffff" stroke="#a4ddc0" stroke-width="1.3"/>
+<text x="88.0" y="782.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="700" fill="#12734f" text-anchor="start">Canonical path (active): upserts to “educopilot_chunks”</text>
+<text x="88.0" y="802.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.8" font-weight="400" fill="#7a8296" text-anchor="start">Legacy Celery endpoints exist but are not used by the current upload flow</text>
+<text x="74.0" y="836.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#586176" text-anchor="start">Embedding: all-MiniLM-L6-v2, 384-dim  ·  Chunking: 512 tokens / 50 overlap</text>
+<rect x="980.0" y="596.0" width="892.0" height="300.0" rx="16" fill="#f2eaff" stroke="#d0b8f2" stroke-width="1.8"/>
+<text x="1006.0" y="634.0" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="800" fill="#5e35b4" text-anchor="start">TEAM 4B — RETRIEVAL + GENERATION</text>
+<text x="1006.0" y="656.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#7a8296" text-anchor="start">FastAPI · port 8002 · service-JWT protected</text>
+<rect x="1006.0" y="680.0" width="268.0" height="62.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="1140.0" y="702.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="700" fill="#1b2130" text-anchor="middle">Retrieve (hybrid + RRF)</text>
+<line x1="1274.0" y1="711.0" x2="1292.0" y2="711.0" stroke="#5e35b4" stroke-width="1.7" marker-end="url(#arrowPurple)"/>
+<rect x="1292.0" y="680.0" width="268.0" height="62.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="1426.0" y="702.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="700" fill="#1b2130" text-anchor="middle">Generate (local LLM)</text>
+<line x1="1560.0" y1="711.0" x2="1578.0" y2="711.0" stroke="#5e35b4" stroke-width="1.7" marker-end="url(#arrowPurple)"/>
+<rect x="1578.0" y="680.0" width="268.0" height="62.0" rx="8" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="1712.0" y="702.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.8" font-weight="700" fill="#1b2130" text-anchor="middle">Cite (page / timestamp)</text>
+<rect x="1006.0" y="760.0" width="840.0" height="58.0" rx="8" fill="#ffffff" stroke="#d0b8f2" stroke-width="1.3"/>
+<text x="1020.0" y="782.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="700" fill="#5e35b4" text-anchor="start">Generation-authority filter (fail-closed): unconfirmed chunks excluded</text>
+<text x="1020.0" y="802.0" font-family="'Segoe UI', Arial, sans-serif" font-size="11.8" font-weight="400" fill="#7a8296" text-anchor="start">Reranker implemented but disabled by default</text>
+<text x="1006.0" y="836.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#96650f" text-anchor="start">Prompt-injection mitigation: query text is sanitized; model compliance is not guaranteed</text>
+<line x1="494.0" y1="896.0" x2="494.0" y2="936.0" stroke="#12734f" stroke-width="1.7" marker-end="url(#arrowGreen)"/>
+<line x1="1426.0" y1="896.0" x2="1426.0" y2="936.0" stroke="#5e35b4" stroke-width="1.7" marker-end="url(#arrowPurple)"/>
+<rect x="48.0" y="936.0" width="1824.0" height="96.0" rx="14" fill="#f3f5fb" stroke="#d7dbe3" stroke-width="1.4"/>
+<text x="70.0" y="962.0" font-family="'Segoe UI', Arial, sans-serif" font-size="15.5" font-weight="800" fill="#3a4152" text-anchor="start">SHARED DATA &amp; STORAGE</text>
+<rect x="70.0" y="976.0" width="343.2" height="42.0" rx="7" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="241.6" y="1002.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12" font-weight="700" fill="#1b2130" text-anchor="middle">MongoDB :27017</text>
+<rect x="429.2" y="976.0" width="343.2" height="42.0" rx="7" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="600.8" y="1002.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12" font-weight="700" fill="#1b2130" text-anchor="middle">Qdrant :6333</text>
+<rect x="788.4" y="976.0" width="343.2" height="42.0" rx="7" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="960.0" y="1002.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12" font-weight="700" fill="#1b2130" text-anchor="middle">Redis — Team4A :6379</text>
+<rect x="1147.6" y="976.0" width="343.2" height="42.0" rx="7" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="1319.2" y="1002.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12" font-weight="700" fill="#1b2130" text-anchor="middle">Redis — Team4B :6380</text>
+<rect x="1506.8" y="976.0" width="343.2" height="42.0" rx="7" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="1678.4" y="1002.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12" font-weight="700" fill="#1b2130" text-anchor="middle">Local File Storage</text>
+</svg>

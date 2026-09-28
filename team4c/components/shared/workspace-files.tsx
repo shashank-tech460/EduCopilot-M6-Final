@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FileText, Film, Link as LinkIcon, Plus, Upload } from "lucide-react";
 
@@ -33,6 +33,7 @@ import { toast } from "@/store/useToastStore";
 import { useAppStore, type UploadState } from "@/store/appStore";
 import { UploadTracker } from "@/components/files/UploadTracker";
 import { validateUploadedFile } from "@/lib/validation";
+import { useHydrated } from "@/hooks/useHydrated";
 
 export interface MaterialSummary {
   id: string;
@@ -84,6 +85,11 @@ const TYPE_LABEL: Record<MaterialSummary["type"], string> = {
   youtube_url: "YouTube",
 };
 
+/** Stage 10 — how often to re-check a still-processing material's real
+ * server-side status. See the polling `useEffect` in `WorkspaceFiles`
+ * for why this exists. */
+const LEARNING_MATERIALS_POLL_INTERVAL_MS = 4000;
+
 /** Requirement 5.6 — file size display. Null (YouTube URLs) renders nothing. */
 function formatBytes(bytes: number | null): string | null {
   if (bytes === null || bytes === undefined) {
@@ -126,6 +132,13 @@ export function formatUploadDate(iso: string): string {
  */
 export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFilesProps) {
   const router = useRouter();
+  /**
+   * Stage 10 — closes a live-reproduced hydration race: "Add Material"
+   * (below) could silently swallow the very first click on a
+   * freshly-loaded workspace page. See hooks/useHydrated.ts's own
+   * docstring for the full mechanism.
+   */
+  const hydrated = useHydrated();
   const [materials, setMaterials] = useState(initialMaterials);
   // Reactive subscription (not getState()) so the UI actually re-renders as
   // xhr.upload.onprogress fires — getState() elsewhere in this file is used
@@ -139,7 +152,68 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<MaterialSummary | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const hasPendingMaterial = materials.some(
+    (material) => material.status === "uploading" || material.status === "processing"
+  );
+
+  /**
+   * Stage 10 — fixes the reported "Learning Materials panel refresh"
+   * bug. `materials` above is seeded ONCE from `initialMaterials` via a
+   * plain `useState` initializer, which React never re-runs on a later
+   * prop change. Every `router.refresh()` call elsewhere in this file
+   * re-fetches the server component tree and produces a fresh
+   * `initialMaterials` prop, but nothing here ever synced that new
+   * value into `materials` — so a material whose Team A ingestion
+   * finishes asynchronously (processing -> ready/failed), often well
+   * after the upload request itself already returned, stayed stuck
+   * showing "processing" until the user did a full hard reload
+   * (remounting this component from scratch). That produced exactly the
+   * reported "intermittent" symptom: it looked fine immediately after
+   * an action that ALSO called `setMaterials` directly, but not
+   * otherwise, and never resolved on its own no matter how long the
+   * user waited.
+   *
+   * Fix: poll the same `GET /api/workspaces/{id}/files` endpoint
+   * `initialMaterials` itself came from, but only while at least one
+   * material is still non-terminal ("uploading"/"processing"). The
+   * effect only ever STARTS the interval while `hasPendingMaterial` is
+   * true (so a workspace where everything is already ready/failed never
+   * makes a single poll request), but each tick decides for itself,
+   * from the data it JUST fetched, whether to `clearInterval` — rather
+   * than waiting for a React re-render to flip `hasPendingMaterial` and
+   * tear the effect down. Stopping on the freshly-fetched data directly
+   * means this can't fire one tick too many depending on how quickly
+   * React happens to re-render after `setMaterials`.
+   */
+  useEffect(() => {
+    if (!hasPendingMaterial) {
+      return;
+    }
+    const intervalId = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/workspaces/${workspaceId}/files`);
+        if (!response.ok) {
+          return;
+        }
+        const data: MaterialSummary[] = await response.json();
+        setMaterials(data);
+        const stillPending = data.some(
+          (material) => material.status === "uploading" || material.status === "processing"
+        );
+        if (!stillPending) {
+          clearInterval(intervalId);
+        }
+      } catch {
+        // Transient network hiccup — the next tick tries again; a
+        // background poll never surfaces an error toast.
+      }
+    }, LEARNING_MATERIALS_POLL_INTERVAL_MS);
+
+    return () => clearInterval(intervalId);
+  }, [workspaceId, hasPendingMaterial]);
 
   function resetForm() {
     setYoutubeUrl("");
@@ -159,6 +233,16 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
    * provides no browser upload-progress events — `xhr.upload.onprogress`
    * is the only way to get real, byte-driven percentage/ETA (Requirement
    * 5.2), not a timer or animation standing in for one.
+   *
+   * Stage 9: `uploadId` (already a `crypto.randomUUID()` minted once per
+   * logical upload attempt in handleSubmit, and — critically — the SAME
+   * id `handleRetry` reuses rather than regenerating) is sent to the
+   * server as `uploadIdempotencyKey`. This is what lets the server tell
+   * "this is a retry of an attempt whose response never reached the
+   * browser" apart from "this is a brand-new upload", and reuse the
+   * already-created File/already-stored bytes instead of duplicating
+   * them (see lib/ingestion.ts's `resolveUploadedFile`) — no new field or
+   * identifier was introduced client-side for this.
    */
   function uploadFile(uploadId: string, file: globalThis.File, materialType: "pdf" | "video") {
     const startTime = Date.now();
@@ -184,7 +268,13 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
     };
 
     xhr.onload = () => {
-      let data: { error?: string; id?: string; originalName?: string } | null = null;
+      let data: {
+        error?: string;
+        id?: string;
+        originalName?: string;
+        status?: MaterialSummary["status"];
+        processingError?: string | null;
+      } | null = null;
       try {
         data = JSON.parse(xhr.responseText);
       } catch {
@@ -203,9 +293,29 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
         return;
       }
 
+      // Stage 9: the upload TRANSPORT succeeded (2xx) -- the request body
+      // was received, bytes were stored, and a File document exists -- but
+      // Team A's own ingestion attempt for it may still have failed
+      // (app/api/workspaces/[id]/files/route.ts's handOffToTeamA sets
+      // `status: "failed"` on that SAME File and still responds 2xx, since
+      // the route itself did succeed at creating/storing the material).
+      // Previously this branch treated ANY 2xx as unconditional success,
+      // which silently misreported a real ingestion failure as "Material
+      // added". The file is still real and still added to the list here
+      // (its own MaterialCard now offers a "Retry" action for exactly this
+      // case), but the toast must not claim success for something that
+      // didn't actually finish.
       setMaterials((prev) => [data as MaterialSummary, ...prev]);
       useAppStore.getState().removeUpload(uploadId);
-      toast({ title: "Material added", description: data?.originalName, variant: "success" });
+      if (data?.status === "failed") {
+        toast({
+          title: "Upload saved, but processing failed",
+          description: data.processingError ?? "You can retry processing from the materials list.",
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "Material added", description: data?.originalName, variant: "success" });
+      }
       router.refresh();
     };
 
@@ -218,6 +328,7 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
     const formData = new FormData();
     formData.set("type", materialType);
     formData.set("file", file);
+    formData.set("uploadIdempotencyKey", uploadId);
     xhr.send(formData);
   }
 
@@ -267,6 +378,14 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
         const formData = new FormData();
         formData.set("type", "youtube_url");
         formData.set("youtubeUrl", youtubeUrl);
+        // Stage 9 — same idempotency mechanism as the PDF/MP4 path
+        // (see uploadFile's own doc comment): guards against this exact
+        // submission being duplicated by an ambiguous network failure.
+        // A fresh key each submit is correct here (unlike uploadFile,
+        // there is no retry-with-the-same-attempt concept for this
+        // fetch-based path — the button is simply re-enabled on failure
+        // for the user to resubmit, which is a new attempt).
+        formData.set("uploadIdempotencyKey", crypto.randomUUID());
 
         const response = await fetch(`/api/workspaces/${workspaceId}/files`, {
           method: "POST",
@@ -368,6 +487,60 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
     }
   }
 
+  /**
+   * Stage 9 — retries Team A ingestion for an already-uploaded material
+   * whose status is "failed" (app/api/workspaces/[id]/files/[fileId]/
+   * retry/route.ts), without re-uploading any bytes. This is the retry
+   * affordance for a failure the upload tracker above never saw at all
+   * (e.g. the dialog was already closed, or the page was reloaded, by
+   * the time the ingestion failure happened or was noticed) — see
+   * MaterialCard's own "Retry" button, rendered only for `status ===
+   * "failed"` and disabled for the duration of this request
+   * (`retryingId`), so a rapid double-click can't fire it twice.
+   */
+  async function handleRetryIngestion(material: MaterialSummary) {
+    setRetryingId(material.id);
+
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/files/${material.id}/retry`, {
+        method: "POST",
+      });
+
+      let data: (MaterialSummary & { error?: string }) | null = null;
+      try {
+        data = await response.json();
+      } catch {
+        toast({ title: "Couldn't retry processing", description: "Please try again.", variant: "destructive" });
+        return;
+      }
+
+      if (!response.ok) {
+        toast({
+          title: "Couldn't retry processing",
+          description: data?.error ?? "Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      setMaterials((prev) => prev.map((existing) => (existing.id === material.id ? (data as MaterialSummary) : existing)));
+      if (data?.status === "ready") {
+        toast({ title: "Material processed", description: material.originalName, variant: "success" });
+      } else {
+        toast({
+          title: "Processing failed again",
+          description: data?.processingError ?? "Please try again later.",
+          variant: "destructive",
+        });
+      }
+      router.refresh();
+    } catch {
+      toast({ title: "Couldn't retry processing", description: "Please try again.", variant: "destructive" });
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -380,7 +553,7 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
           }}
         >
           <DialogTrigger asChild>
-            <Button size="sm">
+            <Button size="sm" disabled={!hydrated}>
               <Plus className="h-4 w-4" />
               Add Material
             </Button>
@@ -485,6 +658,8 @@ export function WorkspaceFiles({ workspaceId, initialMaterials }: WorkspaceFiles
               onSelect={handleSelectMaterial}
               onDelete={(m) => setPendingDelete(m)}
               isDeleting={deletingId === material.id}
+              onRetryIngestion={handleRetryIngestion}
+              isRetrying={retryingId === material.id}
             />
           ))
         )}

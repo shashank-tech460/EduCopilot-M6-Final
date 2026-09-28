@@ -43,7 +43,9 @@ from fastapi import status
 from fastapi.testclient import TestClient
 
 import app.api.canonical_ingest as canonical_ingest_module
-from app.api.canonical_ingest import get_canonical_orchestrator, get_service_jwt_verifier
+from app.api.auth_dependency import get_service_jwt_verifier
+from app.api.canonical_ingest import get_canonical_orchestrator
+from app.config.settings import Settings
 from app.main import app
 from app.pipeline.canonical_ingestion import CanonicalIngestionOrchestrator
 from app.pipeline.ingestion_lock import IngestionLock
@@ -815,3 +817,186 @@ def test_mp4_branch_error_handling_remains_completely_unchanged(client, monkeypa
     response = client.post("/v1/ingest", json=_valid_body(file_type="mp4"), headers=_auth(token))
 
     assert response.status_code == status.HTTP_502_BAD_GATEWAY, response.text
+
+
+# ---------------------------------------------------------------------------
+# STEP 1 REMEDIATION -- _ensure_local_demo_canonical_collection: the
+# canonical-ingestion sibling of test_celery_app.py's own
+# _ensure_local_demo_qdrant_collection tests, same fake-client convention
+# (a fake exposing only the real qdrant_client.QdrantClient methods this
+# function actually needs -- get_collections/create_collection/
+# create_payload_index -- never Publisher's deliberately narrower
+# upsert-only QdrantClientProtocol).
+# ---------------------------------------------------------------------------
+
+
+class _FakeCanonicalCollection:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeCanonicalCollectionsResponse:
+    def __init__(self, names):
+        self.collections = [_FakeCanonicalCollection(n) for n in names]
+
+
+class _FakeCanonicalQdrantAdminClient:
+    def __init__(self, existing_names=(), raise_on_get_collections=None):
+        self.existing = set(existing_names)
+        self.create_calls: list[tuple[str, object]] = []
+        self.index_calls: list[tuple[str, str, object]] = []
+        self.get_collections_calls = 0
+        self._raise_on_get_collections = raise_on_get_collections
+
+    def get_collections(self):
+        self.get_collections_calls += 1
+        if self._raise_on_get_collections is not None:
+            raise self._raise_on_get_collections
+        return _FakeCanonicalCollectionsResponse(self.existing)
+
+    def create_collection(self, collection_name, vectors_config):
+        self.create_calls.append((collection_name, vectors_config))
+        self.existing.add(collection_name)
+
+    def create_payload_index(self, collection_name, field_name, field_schema):
+        self.index_calls.append((collection_name, field_name, field_schema))
+
+
+@pytest.fixture(autouse=True)
+def _reset_canonical_collection_ensured_flag():
+    """The provisioning function caches success in a module-level flag
+    (so it only round-trips to Qdrant once per process, not once per
+    request) -- reset between tests so one test's success doesn't make
+    the next test's "still needs provisioning" scenario silently skip
+    the real check.
+    """
+
+    canonical_ingest_module._canonical_collection_ensured = False
+    yield
+    canonical_ingest_module._canonical_collection_ensured = False
+
+
+def test_canonical_collection_already_exists_does_nothing():
+    settings = Settings(canonical_qdrant_collection_name="educopilot_chunks", _env_file=None)
+    client = _FakeCanonicalQdrantAdminClient(existing_names=["educopilot_chunks"])
+
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=client)
+
+    assert client.create_calls == []
+    assert client.get_collections_calls == 1
+
+
+def test_canonical_collection_missing_is_created_with_payload_indexes():
+    settings = Settings(canonical_qdrant_collection_name="educopilot_chunks", _env_file=None)
+    client = _FakeCanonicalQdrantAdminClient(existing_names=[])
+
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=client)
+
+    assert len(client.create_calls) == 1
+    created_name, _vectors_config = client.create_calls[0]
+    assert created_name == "educopilot_chunks"
+    # All three payload indexes team4b/app/core/config.py documents as
+    # required for this collection -- workspace_id, document_id,
+    # ingestion_generation -- created, none skipped.
+    indexed_fields = {field_name for _coll, field_name, _schema in client.index_calls}
+    assert indexed_fields == {"workspace_id", "document_id", "ingestion_generation"}
+
+
+def test_canonical_collection_uses_the_configured_embedding_dimensions_and_cosine_distance():
+    from qdrant_client.models import Distance
+
+    settings = Settings(
+        canonical_qdrant_collection_name="educopilot_chunks",
+        embedding_dimensions=384,
+        _env_file=None,
+    )
+    client = _FakeCanonicalQdrantAdminClient(existing_names=[])
+
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=client)
+
+    _name, vectors_config = client.create_calls[0]
+    assert vectors_config.size == 384
+    assert vectors_config.distance == Distance.COSINE
+
+
+def test_canonical_collection_initialization_is_idempotent_across_repeated_calls():
+    settings = Settings(canonical_qdrant_collection_name="educopilot_chunks", _env_file=None)
+    client = _FakeCanonicalQdrantAdminClient(existing_names=[])
+
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=client)
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=client)
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=client)
+
+    # The SECOND and THIRD calls don't even touch Qdrant -- the module-
+    # level "already ensured" flag short-circuits them before
+    # get_collections() is ever called again.
+    assert len(client.create_calls) == 1
+    assert client.get_collections_calls == 1
+
+
+def test_canonical_collection_qdrant_temporarily_unavailable_does_not_raise():
+    settings = Settings(canonical_qdrant_collection_name="educopilot_chunks", _env_file=None)
+    client = _FakeCanonicalQdrantAdminClient(raise_on_get_collections=ConnectionError("simulated: Qdrant not ready yet"))
+
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=client)  # must not raise
+
+    assert client.create_calls == []
+
+
+def test_canonical_collection_failure_does_not_cache_the_ensured_flag_so_the_next_call_retries():
+    settings = Settings(canonical_qdrant_collection_name="educopilot_chunks", _env_file=None)
+    failing_client = _FakeCanonicalQdrantAdminClient(raise_on_get_collections=ConnectionError("simulated"))
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=failing_client)
+
+    recovered_client = _FakeCanonicalQdrantAdminClient(existing_names=[])
+    canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=recovered_client)
+
+    assert len(recovered_client.create_calls) == 1, "a failed attempt must not block a later, successful retry"
+
+
+def test_canonical_collection_warning_does_not_leak_connection_details(caplog):
+    import logging
+
+    settings = Settings(
+        canonical_qdrant_collection_name="educopilot_chunks",
+        qdrant_url="http://secret-internal-host:6333",
+        qdrant_api_key="super-secret-key-12345",
+        _env_file=None,
+    )
+    client = _FakeCanonicalQdrantAdminClient(
+        raise_on_get_collections=ConnectionError("connect to super-secret-key-12345@secret-internal-host failed")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        canonical_ingest_module._ensure_local_demo_canonical_collection(settings, client=client)
+
+    warning_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "super-secret-key-12345" not in warning_text
+    assert "secret-internal-host" not in warning_text
+
+
+def test_get_canonical_orchestrator_calls_the_provisioning_check(monkeypatch):
+    """The DI provider (get_canonical_orchestrator) -- constructed fresh
+    on every request, no caching -- must invoke the provisioning check
+    every time it's called; the check's OWN module-level flag is what
+    keeps repeated Qdrant round-trips cheap, not the provider skipping
+    the call outright.
+    """
+
+    calls = []
+    monkeypatch.setattr(
+        canonical_ingest_module,
+        "_ensure_local_demo_canonical_collection",
+        lambda settings, client=None: calls.append(settings.canonical_qdrant_collection_name),
+    )
+    # Avoid real Redis/Mongo connections for this narrow DI-wiring check --
+    # MongoAuthorityClient's own __init__ subscripts the client twice
+    # (mongo_client[db][collection]), so the fake must support that.
+    monkeypatch.setattr("redis.Redis.from_url", lambda *_a, **_k: SimpleNamespace())
+    fake_mongo_client = {"educopilot": {"files": SimpleNamespace()}}
+    monkeypatch.setattr("pymongo.MongoClient", lambda *_a, **_k: fake_mongo_client)
+
+    settings = Settings(_env_file=None)
+    canonical_ingest_module.get_canonical_orchestrator(settings=settings)
+
+    assert calls == [settings.canonical_qdrant_collection_name]

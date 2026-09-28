@@ -40,9 +40,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.api.auth_dependency import require_ingest_identity
 from app.config.settings import Settings, get_settings
 from app.models.exceptions import TranscriptUnavailableError, VideoInaccessibleError
 from app.models.schemas import SourceType
@@ -67,19 +68,103 @@ from app.pipeline.remote_source_resolver import (
     TrustedOriginError,
     resolve_pdf_or_mp4_source,
 )
-from app.security.service_jwt import (
-    ServiceIdentity,
-    ServiceJWTVerifier,
-    ServiceTokenError,
-    load_public_keys_json,
-)
+from app.security.service_jwt import ServiceIdentity
 
 logger = logging.getLogger(__name__)
 
 canonical_router = APIRouter()
 
-_BEARER_PREFIX = "Bearer "
-_AUTH_FAILURE_DETAIL = "Invalid or missing authentication."
+#: STEP 1 REMEDIATION -- set once `_ensure_local_demo_canonical_collection`
+#: has confirmed (or created) the canonical collection, so repeat requests
+#: within this process don't re-check Qdrant on every single ingest call.
+#: Left `False` on any failure, so the very next request retries -- never
+#: cached as "done" on a failure path.
+_canonical_collection_ensured = False
+
+
+def _ensure_local_demo_canonical_collection(settings: Settings, client: object = None) -> None:
+    """Idempotently create the SHARED canonical Qdrant collection
+    (`educopilot_chunks`) for THIS PROJECT'S OWN self-contained local/demo
+    deployment, if it does not already exist -- the canonical-ingestion
+    sibling of `app/celery_app.py`'s `_ensure_local_demo_qdrant_collection`
+    for the legacy collection. Same scope note applies verbatim: Team 4B
+    is the documented owner of this collection's production lifecycle
+    (`team4b/app/services/vector_store.py` deliberately only VERIFIES,
+    never creates, the canonical collection when a caller supplies one
+    other than its own configured legacy collection). This function exists
+    ONLY so this project's own bundled local/demo Qdrant instance doesn't
+    require an undocumented manual provisioning step before the very
+    first canonical ingestion can ever succeed -- in a real multi-team
+    deployment this collection is expected to already exist, and this
+    function's create branch would never execute.
+
+    ROOT CAUSE this fixes: without this, `Publisher.publish()`'s first
+    write to a not-yet-existing `educopilot_chunks` fails (correctly,
+    cleanly, with retries exhausted), and the orchestrator's own
+    self-heal cleanup for the (zero) points published then ALSO hit the
+    same missing-collection error -- previously unhandled, crashing with
+    a bare 500 that hid the real cause (see `canonical_mutations.py`'s
+    `_tolerate_missing_collection`, the companion fix for that second
+    half of the bug). This function addresses the root cause directly:
+    the collection now exists before the first publish attempt ever runs.
+
+    Deliberately lazy, best-effort, never blocking a request: any
+    failure here is logged and swallowed -- if the collection genuinely
+    doesn't get created, the existing, unmodified Publisher retry/
+    backoff/`PublicationFailedError` contract handles that exactly as it
+    already did before this function existed. Payload indexes
+    (`workspace_id`, `document_id`, `ingestion_generation`) match
+    `team4b/app/core/config.py`'s own documented expectation for this
+    collection.
+    """
+
+    global _canonical_collection_ensured
+    if _canonical_collection_ensured:
+        return
+
+    try:
+        if client is None:
+            from qdrant_client import QdrantClient
+
+            client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key, check_compatibility=False)
+
+        collection_name = settings.canonical_qdrant_collection_name
+        existing_names = {collection.name for collection in client.get_collections().collections}
+
+        if collection_name not in existing_names:
+            from qdrant_client.models import Distance, PayloadSchemaType, VectorParams
+
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=settings.embedding_dimensions, distance=Distance.COSINE),
+            )
+            client.create_payload_index(collection_name, "workspace_id", PayloadSchemaType.KEYWORD)
+            client.create_payload_index(collection_name, "document_id", PayloadSchemaType.KEYWORD)
+            client.create_payload_index(collection_name, "ingestion_generation", PayloadSchemaType.INTEGER)
+            logger.info(
+                "Created canonical Qdrant collection for local/demo deployment "
+                "(a real deployment is expected to already have this provisioned)",
+                extra={
+                    "collection": collection_name,
+                    "vector_size": settings.embedding_dimensions,
+                    "distance": "cosine",
+                },
+            )
+        else:
+            logger.info(
+                "Canonical Qdrant collection already exists (local/demo provisioning check) -- nothing to do",
+                extra={"collection": collection_name},
+            )
+
+        _canonical_collection_ensured = True
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not verify/create the local/demo canonical Qdrant collection "
+            "(the existing Publisher retry/backoff contract handles this during "
+            "actual publication if it remains unresolved)",
+            extra={"collection": settings.canonical_qdrant_collection_name, "error_type": type(exc).__name__},
+        )
 
 
 class CanonicalIngestRequest(BaseModel):
@@ -119,39 +204,6 @@ class CanonicalIngestResponse(BaseModel):
     generation: int | None = None
 
 
-def get_service_jwt_verifier(settings: Settings = Depends(get_settings)) -> ServiceJWTVerifier:
-    public_keys = load_public_keys_json(settings.service_jwt_public_keys_json)
-    return ServiceJWTVerifier(
-        public_keys_by_kid=public_keys,
-        expected_issuer=settings.service_jwt_expected_issuer,
-        expected_audience=settings.service_jwt_expected_audience,
-        required_scope=settings.service_jwt_required_scope,
-        clock_skew_seconds=settings.service_jwt_clock_skew_seconds,
-    )
-
-
-def require_ingest_identity(
-    request: Request,
-    verifier: ServiceJWTVerifier = Depends(get_service_jwt_verifier),
-) -> ServiceIdentity:
-    auth_header = request.headers.get("authorization")
-    if not auth_header or not auth_header.startswith(_BEARER_PREFIX):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILURE_DETAIL)
-
-    token = auth_header[len(_BEARER_PREFIX) :].strip()
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILURE_DETAIL)
-
-    try:
-        return verifier.verify(token)
-    except ServiceTokenError as exc:
-        logger.warning(
-            "Internal service JWT verification failed for /v1/ingest",
-            extra={"failure_category": "service_jwt_verification"},
-        )
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILURE_DETAIL) from exc
-
-
 def get_canonical_orchestrator(settings: Settings = Depends(get_settings)) -> CanonicalIngestionOrchestrator:
     """Constructs the REAL Phase 1 orchestrator from real infrastructure
     clients (Redis, Mongo, Qdrant) -- unmodified Phase 1 classes, used
@@ -164,6 +216,8 @@ def get_canonical_orchestrator(settings: Settings = Depends(get_settings)) -> Ca
 
     import pymongo
     import redis
+
+    _ensure_local_demo_canonical_collection(settings)
 
     redis_client = redis.Redis.from_url(settings.redis_broker_url)
     mongo_client = pymongo.MongoClient(settings.mongo_url)

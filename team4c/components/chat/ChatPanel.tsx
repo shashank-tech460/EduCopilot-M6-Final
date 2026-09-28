@@ -11,6 +11,7 @@ import { SourceAttribution } from "@/components/chat/SourceAttribution";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { useChatStream } from "@/hooks/useChatStream";
 import { useActiveConversation } from "@/hooks/useActiveConversation";
+import { useConversationMessages } from "@/hooks/useConversationMessages";
 import { SourceScopePicker } from "@/components/chat/SourceScopePicker";
 import type { SourceAttribution as SourceAttributionType } from "@/store/appStore";
 
@@ -66,7 +67,16 @@ const SUGGESTION_CHIPS: SuggestionChip[] = [
 
 export function ChatPanel({ workspaceId }: { workspaceId: string }) {
   const conversationId = useActiveConversation(workspaceId);
-  const { messages, submitMessage, isStreaming, error, retry, offlineQueue } = useChatStream(workspaceId, conversationId);
+  // Persistent chat history (Step 6) — restores a selected/resumed
+  // conversation's saved messages; `isRestoring` distinguishes "still
+  // loading this conversation's history" from "confirmed genuinely empty"
+  // so the wrong empty-state copy is never shown mid-fetch.
+  const { initialMessages, isLoading: isRestoring } = useConversationMessages(workspaceId, conversationId);
+  const { messages, submitMessage, isStreaming, error, retry, timedOut, offlineQueue } = useChatStream(
+    workspaceId,
+    conversationId,
+    initialMessages
+  );
   const [input, setInput] = useState("");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -103,6 +113,35 @@ export function ChatPanel({ workspaceId }: { workspaceId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, lastMessageText]);
 
+  // Stage 2 — this project's own local CPU-only Ollama generation is
+  // genuinely slow and variable (8.9s-140s+ measured across real
+  // validation passes, see docs/LIMITATIONS.md), and the streaming
+  // design (Stage 9B/team4b's own Phase-5K-safe buffering) deliberately
+  // withholds the first visible token until enough of the answer is
+  // known to be safe to show — so a real, correctly-working request can
+  // legitimately leave the assistant bubble showing no text for well
+  // over LONG_WAIT_THRESHOLD_MS while "Thinking…" is the only signal
+  // something is happening. Reported as "the response remains blank...
+  // appears empty or stuck" — investigated live (real streaming
+  // requests, confirmed progressively updating DOM, no hang, no
+  // console/network error) and traced through useChatStream.ts/
+  // app/api/chat/route.ts (no artificial timeout or stale-response
+  // guard exists to discard a slow-but-valid answer). This adds a
+  // second, more reassuring line once a request has genuinely been
+  // running a while, so a slow-but-healthy generation reads as "still
+  // working," not as something that might be stuck — without changing
+  // streaming behavior, timeouts, or any backend code.
+  const LONG_WAIT_THRESHOLD_MS = 15_000;
+  const [isTakingLongerThanUsual, setIsTakingLongerThanUsual] = useState(false);
+  useEffect(() => {
+    if (!isStreaming) {
+      setIsTakingLongerThanUsual(false);
+      return;
+    }
+    const timer = setTimeout(() => setIsTakingLongerThanUsual(true), LONG_WAIT_THRESHOLD_MS);
+    return () => clearTimeout(timer);
+  }, [isStreaming]);
+
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!input.trim() || isStreaming) {
@@ -121,7 +160,16 @@ export function ChatPanel({ workspaceId }: { workspaceId: string }) {
     <div className="flex h-full flex-col">
       <SourceScopePicker workspaceId={workspaceId} conversationId={conversationId} />
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4">
-        {messages.length === 0 ? (
+        {isRestoring ? (
+          // Distinct from the "no messages yet" empty state below — this
+          // conversation may well have history, it just hasn't loaded
+          // yet. Showing "Ask your AI tutor" here would misrepresent a
+          // conversation that actually has saved messages.
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            <span>Loading conversation…</span>
+          </div>
+        ) : messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-5">
             <EmptyState
               icon={Sparkles}
@@ -219,9 +267,26 @@ export function ChatPanel({ workspaceId }: { workspaceId: string }) {
         )}
 
         {isStreaming ? (
-          <div className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span>Thinking…</span>
+          <div className="mt-2 flex flex-col gap-1 text-sm text-muted-foreground">
+            <div className="flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>Thinking…</span>
+            </div>
+            {isTakingLongerThanUsual ? (
+              <span className="pl-6 text-xs" role="status">
+                Still working — detailed answers on this local setup can take a little longer.
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
+        {timedOut ? (
+          <div
+            className="mt-2 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
+            role="status"
+          >
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>This response took too long and may be stuck. Please try asking again.</span>
           </div>
         ) : null}
 

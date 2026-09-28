@@ -179,8 +179,8 @@ Open http://localhost:3000.
 
 ## Testing
 
-Full detail: [TESTING.md](TESTING.md). Current real baseline: 469 Vitest
-tests (unit + component) passing, a 12-spec Playwright E2E suite covering
+Full detail: [TESTING.md](TESTING.md). Current real baseline: 669 Vitest
+tests (unit + component) passing, a 13-test Playwright E2E suite across 7 spec files covering
 real signup/login/logout, workspace CRUD and isolation, a full real
 upload → ingest → ask → grounded-answer → citation flow, cross-source/
 cross-workspace isolation, and axe-core accessibility on 5 pages — all

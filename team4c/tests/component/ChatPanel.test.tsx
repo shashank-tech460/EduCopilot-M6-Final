@@ -46,7 +46,30 @@ vi.mock("@/hooks/useSourceScope", () => ({
   }),
 }));
 
+// Step 6: ChatPanel now also calls useConversationMessages directly
+// (a real useQuery call, which throws without a QueryClientProvider —
+// none of these pre-existing tests provide one, and none of them are
+// about restoration itself, which has its own dedicated test file).
+// Defaults to "confirmed no history, not loading" so every existing test
+// here keeps behaving exactly as it did before Step 6 — they all render
+// ChatPanel as a fresh, empty conversation.
+const useConversationMessagesMock = vi.fn();
+vi.mock("@/hooks/useConversationMessages", () => ({
+  useConversationMessages: (...args: unknown[]) => useConversationMessagesMock(...args),
+}));
+
+// Stage 6: useChatStream now also calls useQueryClient() (sidebar
+// invalidation on message completion, covered separately in
+// tests/unit/useChatStream-sidebarInvalidation.test.tsx) -- another real
+// react-query hook that throws without a QueryClientProvider, same
+// reasoning as the useConversationMessages mock above.
+vi.mock("@tanstack/react-query", () => ({
+  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
+}));
+
 import { ChatPanel } from "@/components/chat/ChatPanel";
+
+const setMessagesMock = vi.fn();
 
 function baseChatState(overrides: Partial<ReturnType<typeof useChatMock>> = {}) {
   return {
@@ -56,6 +79,7 @@ function baseChatState(overrides: Partial<ReturnType<typeof useChatMock>> = {}) 
     error: undefined,
     regenerate: regenerateMock,
     clearError: clearErrorMock,
+    setMessages: setMessagesMock,
     ...overrides,
   };
 }
@@ -63,6 +87,7 @@ function baseChatState(overrides: Partial<ReturnType<typeof useChatMock>> = {}) 
 beforeEach(() => {
   vi.clearAllMocks();
   useChatMock.mockReturnValue(baseChatState());
+  useConversationMessagesMock.mockReturnValue({ initialMessages: [], isLoading: false, isError: false });
 
   // @tanstack/react-virtual measures the scroll container's real layout
   // size via `offsetWidth`/`offsetHeight` (confirmed by reading
@@ -140,6 +165,72 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
     expect(screen.getByLabelText("Chat message")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  });
+
+  it(
+    "Stage 2 — shows a reassuring 'still working' message once a stream has been running a while, without hiding the original Thinking… indicator",
+    async () => {
+      vi.useFakeTimers();
+      try {
+        useChatMock.mockReturnValue(baseChatState({ status: "streaming" }));
+
+        render(<ChatPanel workspaceId="ws-1" />);
+        expect(screen.getByText("Thinking…")).toBeInTheDocument();
+        expect(screen.queryByText(/still working/i)).not.toBeInTheDocument();
+
+        await act(async () => {
+          vi.advanceTimersByTime(15_000);
+        });
+
+        expect(screen.getByText("Thinking…")).toBeInTheDocument(); // still there, not replaced
+        expect(screen.getByText(/still working/i)).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it("Stage 2 — never shows the 'still working' message before the threshold elapses", async () => {
+    vi.useFakeTimers();
+    try {
+      useChatMock.mockReturnValue(baseChatState({ status: "streaming" }));
+
+      render(<ChatPanel workspaceId="ws-1" />);
+
+      await act(async () => {
+        vi.advanceTimersByTime(14_000);
+      });
+
+      expect(screen.queryByText(/still working/i)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Stage 2 — clears the 'still working' message once streaming finishes, and a later stream starts its own fresh timer", async () => {
+    vi.useFakeTimers();
+    try {
+      useChatMock.mockReturnValue(baseChatState({ status: "streaming" }));
+      const { rerender } = render(<ChatPanel workspaceId="ws-1" />);
+
+      await act(async () => {
+        vi.advanceTimersByTime(15_000);
+      });
+      expect(screen.getByText(/still working/i)).toBeInTheDocument();
+
+      useChatMock.mockReturnValue(baseChatState({ status: "ready" }));
+      rerender(<ChatPanel workspaceId="ws-1" />);
+      expect(screen.queryByText(/still working/i)).not.toBeInTheDocument();
+
+      // A brand new stream must not inherit the previous one's elapsed
+      // time -- confirms the timer genuinely resets per stream rather
+      // than the flag simply never being cleared.
+      useChatMock.mockReturnValue(baseChatState({ status: "streaming" }));
+      rerender(<ChatPanel workspaceId="ws-1" />);
+      expect(screen.queryByText(/still working/i)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("re-enables input once streaming completes — Requirement 2.4", () => {
@@ -390,5 +481,41 @@ describe("ChatPanel — Requirement 8.1 (visible queued-message notification)", 
     render(<ChatPanel workspaceId="ws-1" />);
 
     expect(screen.queryByText(/queued/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("ChatPanel — restoring a selected conversation (Step 6)", () => {
+  it("shows a loading state, not the empty-conversation prompt, while a conversation's history is still loading", () => {
+    useConversationMessagesMock.mockReturnValue({ initialMessages: undefined, isLoading: true, isError: false });
+    useChatMock.mockReturnValue(baseChatState({ messages: [] }));
+
+    render(<ChatPanel workspaceId="ws-1" />);
+
+    expect(screen.getByText("Loading conversation…")).toBeInTheDocument();
+    expect(screen.queryByText("Ask your AI tutor")).not.toBeInTheDocument();
+  });
+
+  it("shows the real empty-conversation prompt once loading finishes and there is genuinely no history", () => {
+    useConversationMessagesMock.mockReturnValue({ initialMessages: [], isLoading: false, isError: false });
+    useChatMock.mockReturnValue(baseChatState({ messages: [] }));
+
+    render(<ChatPanel workspaceId="ws-1" />);
+
+    expect(screen.queryByText("Loading conversation…")).not.toBeInTheDocument();
+    expect(screen.getByText("Ask your AI tutor")).toBeInTheDocument();
+  });
+
+  it("does not show a loading state once restored messages are already present (messages.length > 0 takes precedence)", () => {
+    useConversationMessagesMock.mockReturnValue({ initialMessages: undefined, isLoading: false, isError: false });
+    useChatMock.mockReturnValue(
+      baseChatState({
+        messages: [{ id: "m1", role: "assistant", parts: [{ type: "text", text: "Restored answer" }] }],
+      })
+    );
+
+    render(<ChatPanel workspaceId="ws-1" />);
+
+    expect(screen.getByText("Restored answer")).toBeInTheDocument();
+    expect(screen.queryByText("Loading conversation…")).not.toBeInTheDocument();
   });
 });

@@ -179,11 +179,13 @@ cd team4b
 python -m pytest -q
 ```
 
-**Expected baseline: 1302 passed, 3 skipped, 1 known pre-existing failure**
+**Expected baseline: 1438 passed, 3 skipped, 1 known pre-existing failure**
 (a stale-ground-truth test, explained in detail in
-[TESTING.md](TESTING.md) — do not delete or weaken it). This baseline was
-re-verified unchanged at the end of every phase in the Phase 5D–5K RAG
-validation arc.
+[TESTING.md](TESTING.md) — do not delete or weaken it). The pass count has
+grown from the `1302` baseline re-verified throughout the Phase 5D–5K RAG
+validation arc as later regression tests were added (rate limiting,
+streaming, lifespan/BM25-refresh) — the known failure's identity is
+unchanged. Current, authoritative count: [M6_STATUS.md](M6_STATUS.md).
 
 ## Troubleshooting
 

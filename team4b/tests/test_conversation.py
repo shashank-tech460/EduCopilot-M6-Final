@@ -470,6 +470,266 @@ class TestRedisErrorHandling:
 
 
 # ---------------------------------------------------------------------------
+# Step 7: seed_history() -- restoring an expired/missing session from an
+# external durable store (Team 4C's MongoDB)
+# ---------------------------------------------------------------------------
+
+
+class TestSeedHistory:
+    def test_seeds_a_missing_session_in_order(self):
+        manager, _client = _manager()
+
+        seeded = manager.seed_history(
+            "s1",
+            [("user", "first", 1.0), ("assistant", "second", 2.0), ("user", "third", 3.0)],
+        )
+
+        assert seeded is True
+        history = manager.get_history("s1")
+        assert [t.content for t in history] == ["first", "second", "third"]
+        assert [t.role for t in history] == ["user", "assistant", "user"]
+
+    def test_preserves_supplied_timestamps(self):
+        manager, _client = _manager()
+
+        manager.seed_history("s1", [("user", "hi", 555.0)])
+
+        assert manager.get_history("s1")[0].timestamp == 555.0
+
+    def test_missing_timestamp_falls_back_to_clock(self):
+        clock = _FakeClock(start=777.0)
+        manager, _client = _manager(clock=clock)
+
+        manager.seed_history("s1", [("user", "hi", None)])
+
+        assert manager.get_history("s1")[0].timestamp == 777.0
+
+    def test_does_not_seed_when_session_already_exists(self):
+        manager, _client = _manager()
+        manager.append_turn("s1", "user", "live turn")
+
+        seeded = manager.seed_history("s1", [("user", "should not appear", 1.0)])
+
+        assert seeded is False
+        history = manager.get_history("s1")
+        assert [t.content for t in history] == ["live turn"]  # not duplicated/overwritten
+
+    def test_repeated_restoration_attempts_do_not_duplicate_turns(self):
+        manager, _client = _manager()
+        turns = [("user", "first", 1.0), ("assistant", "second", 2.0)]
+
+        first = manager.seed_history("s1", turns)
+        second = manager.seed_history("s1", turns)  # e.g. a retried restoration call
+
+        assert first is True
+        assert second is False
+        assert len(manager.get_history("s1")) == 2  # never 4
+
+    def test_truncates_to_the_configured_conversation_window(self):
+        manager, _client = _manager(conversation_window_size=2)
+        turns = [("user", f"turn {i}", float(i)) for i in range(5)]
+
+        manager.seed_history("s1", turns)
+
+        history = manager.get_history("s1")
+        assert [t.content for t in history] == ["turn 3", "turn 4"]  # only the most recent 2
+
+    def test_empty_history_is_a_safe_no_op(self):
+        manager, _client = _manager()
+
+        seeded = manager.seed_history("s1", [])
+
+        assert seeded is True  # nothing to duplicate later, but also nothing failed
+        assert manager.get_history("s1") == []
+
+    def test_cross_session_isolation_seeding_one_session_never_touches_another(self):
+        manager, _client = _manager()
+        manager.append_turn("session-a", "user", "a's live turn")
+
+        manager.seed_history("session-b", [("user", "b's restored turn", 1.0)])
+
+        assert [t.content for t in manager.get_history("session-a")] == ["a's live turn"]
+        assert [t.content for t in manager.get_history("session-b")] == ["b's restored turn"]
+
+    def test_malformed_role_in_supplied_turns_raises_and_writes_nothing(self):
+        # STEP 8: roles are validated BEFORE any write is attempted, so an
+        # invalid entry anywhere in the batch produces NO partial write --
+        # not even the earlier, individually-valid turns.
+        manager, client = _manager()
+
+        with pytest.raises(InvalidConversationRoleError):
+            manager.seed_history("s1", [("user", "ok", 1.0), ("system", "not allowed", 2.0)])  # type: ignore[list-item]
+
+        assert manager.get_history("s1") == []
+        assert manager.session_exists("s1") is False
+        assert "session_lock:s1" not in client._strings  # lock released even on this early raise
+
+    def test_concurrent_seed_attempts_only_one_writes(self):
+        # Simulates two concurrent restoration requests for the SAME
+        # session racing each other: the lock's `SET NX` means only the
+        # first to acquire it actually seeds; the second sees the lock
+        # already held and no-ops, rather than double-appending.
+        manager, client = _manager()
+        client.set(f"session_lock:s1", "1", nx=True, ex=30)  # simulates a request already in flight
+
+        seeded = manager.seed_history("s1", [("user", "late arrival", 1.0)])
+
+        assert seeded is False
+        assert manager.get_history("s1") == []  # never written -- the in-flight request owns this
+
+    def test_lock_is_released_after_a_successful_seed(self):
+        manager, client = _manager()
+
+        manager.seed_history("s1", [("user", "hi", 1.0)])
+
+        assert client.raw_entries("session_lock:s1") == []
+        assert "session_lock:s1" not in client._strings
+
+    def test_lock_acquisition_failure_raises_conversation_store_unavailable(self):
+        client = FakeRedisClient(fail_times={"set": 1})
+        manager, _client = _manager(redis_client=client)
+
+        with pytest.raises(ConversationStoreUnavailableError):
+            manager.seed_history("s1", [("user", "hi", 1.0)])
+
+    def test_a_normal_never_expired_session_is_unaffected_by_a_seed_attempt(self):
+        # A seed call arriving for a session that is very much alive
+        # (e.g. a stale/duplicate restoration request racing a live
+        # conversation) must never disturb its real history.
+        manager, _client = _manager()
+        manager.append_turn("s1", "user", "q1")
+        manager.append_turn("s1", "assistant", "a1")
+
+        seeded = manager.seed_history("s1", [("user", "an old restored turn", 1.0)])
+
+        assert seeded is False
+        assert [t.content for t in manager.get_history("s1")] == ["q1", "a1"]
+
+    # -- Step 8: atomic, all-or-nothing writes (fixes the partial-seeding bug) --
+
+    def test_a_mid_write_redis_failure_leaves_zero_turns_written(self):
+        # STEP 8 regression guard: the pipeline_execute failure hits
+        # AFTER both rpush and expire have been queued into the SAME
+        # pipeline -- proving the whole batch is one atomic unit rather
+        # than N separate round-trips that could each partially land.
+        client = FakeRedisClient(fail_times={"pipeline_execute": 1})
+        manager, _client = _manager(redis_client=client)
+
+        with pytest.raises(ConversationStoreUnavailableError):
+            manager.seed_history("s1", [("user", "first", 1.0), ("assistant", "second", 2.0), ("user", "third", 3.0)])
+
+        assert manager.session_exists("s1") is False
+        assert manager.get_history("s1") == []
+
+    def test_a_failed_seed_can_be_retried_successfully_once_redis_recovers(self):
+        # STEP 8: this is the actual bug fix under test -- with the old
+        # loop-of-append_turn implementation, a mid-write failure left the
+        # session key PARTIALLY created, so this retry would have seen
+        # session_exists()==True and silently no-op'd FOREVER, never
+        # completing the restoration. With the single-pipeline write, the
+        # failed attempt writes nothing, so the retry proceeds normally.
+        client = FakeRedisClient(fail_times={"pipeline_execute": 1})
+        manager, _client = _manager(redis_client=client)
+        turns = [("user", "first", 1.0), ("assistant", "second", 2.0)]
+
+        with pytest.raises(ConversationStoreUnavailableError):
+            manager.seed_history("s1", turns)
+
+        retried = manager.seed_history("s1", turns)  # Redis has "recovered" -- fail_times is exhausted
+
+        assert retried is True
+        assert [t.content for t in manager.get_history("s1")] == ["first", "second"]
+
+    def test_lock_is_released_even_when_the_pipeline_write_fails(self):
+        client = FakeRedisClient(fail_times={"pipeline_execute": 1})
+        manager, _client = _manager(redis_client=client)
+
+        with pytest.raises(ConversationStoreUnavailableError):
+            manager.seed_history("s1", [("user", "hi", 1.0)])
+
+        assert "session_lock:s1" not in client._strings
+
+
+# ---------------------------------------------------------------------------
+# Step 3 remediation: delete_session() -- best-effort Redis cleanup support
+# for a deleted Team 4C Conversation.
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSession:
+    def test_deletes_an_existing_session(self):
+        manager, client = _manager()
+        manager.append_turn("s1", "user", "hi")
+
+        deleted = manager.delete_session("s1")
+
+        assert deleted is True
+        assert manager.session_exists("s1") is False
+        assert client.raw_entries("session:s1") == []
+
+    def test_deleting_a_nonexistent_session_is_a_safe_no_op(self):
+        manager, _client = _manager()
+
+        deleted = manager.delete_session("never-existed")
+
+        assert deleted is False  # a successful outcome, not an error
+
+    def test_exact_key_deletion_only_removes_the_named_session(self):
+        """Direct regression guard: delete_session must derive its Redis
+        key exactly the same way every other method on this class does
+        (`_session_key`) -- never a pattern, prefix, or scan -- so it can
+        only ever remove the one session it was asked to."""
+
+        manager, client = _manager()
+        manager.append_turn("abc", "user", "short id")
+        manager.append_turn("abcdef", "user", "longer id sharing a prefix")
+
+        manager.delete_session("abc")
+
+        assert manager.session_exists("abc") is False
+        assert manager.session_exists("abcdef") is True
+        assert [t.content for t in manager.get_history("abcdef")] == ["longer id sharing a prefix"]
+
+    def test_deleting_one_session_never_touches_another(self):
+        manager, _client = _manager()
+        manager.append_turn("session-a", "user", "a's message")
+        manager.append_turn("session-b", "user", "b's message")
+
+        manager.delete_session("session-a")
+
+        assert manager.session_exists("session-a") is False
+        assert manager.session_exists("session-b") is True
+        assert [t.content for t in manager.get_history("session-b")] == ["b's message"]
+
+    def test_deleted_session_cannot_be_restored_by_a_plain_read(self):
+        manager, _client = _manager()
+        manager.append_turn("s1", "user", "hi")
+
+        manager.delete_session("s1")
+
+        assert manager.get_history("s1") == []
+        assert manager.get_windowed_history("s1") == []
+
+    def test_redis_failure_raises_conversation_store_unavailable(self):
+        client = FakeRedisClient(fail_times={"delete": 1})
+        manager, _client = _manager(redis_client=client)
+        manager.append_turn("s1", "user", "hi")
+
+        with pytest.raises(ConversationStoreUnavailableError):
+            manager.delete_session("s1")
+
+    def test_repeated_deletion_of_the_same_session_is_idempotent(self):
+        manager, _client = _manager()
+        manager.append_turn("s1", "user", "hi")
+
+        first = manager.delete_session("s1")
+        second = manager.delete_session("s1")
+
+        assert first is True
+        assert second is False  # already gone -- a safe no-op, not an error
+
+
+# ---------------------------------------------------------------------------
 # Task 10.1: check_health()
 # ---------------------------------------------------------------------------
 

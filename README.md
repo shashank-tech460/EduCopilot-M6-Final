@@ -2,9 +2,12 @@
 
 **An educational RAG copilot** — students upload their own course PDFs and
 lecture videos, organize them into workspaces, and ask an AI Tutor
-questions. Every answer is grounded in that student's own material, with
-a citation back to the exact page or timestamp — never a guess from the
-model's general training data.
+questions. Answers are retrieved and cited from that student's own material —
+back to the exact page or timestamp — rather than the model's general training
+data. This is the system's design goal, verified in the large majority of
+tested cases; it is not a mathematical guarantee for every possible question,
+and the real, disclosed exceptions are in
+[docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md).
 
 ## Overview
 
@@ -43,12 +46,21 @@ cover the question, rather than guessing.
   before being rendered, and traceable to a specific PDF page or video
   timestamp.
 - **Hybrid retrieval** — semantic (vector) search + BM25 keyword search,
-  merged with Reciprocal Rank Fusion, so both conceptual and exact-terminology
-  questions are covered.
-- **Source-grounded, not hallucination-prone by design** — the LLM is
-  instructed to answer only from retrieved evidence, with a documented,
-  measured (not just claimed) mitigation for prompt injection. See
-  [docs/SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md).
+  merged with Reciprocal Rank Fusion, designed to improve coverage of both conceptual
+  and exact-terminology questions. This does not guarantee that every question
+  retrieves the correct evidence — see
+  [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) for measured, real retrieval
+  gaps.
+- **Retrieval-grounded generation, designed to reduce hallucination** — the LLM is
+  instructed to answer only from retrieved evidence, and citations are built only from
+  retrieval metadata, never invented. Retrieval can still miss relevant material, and
+  the model can still produce an incorrect or insufficiently-supported answer — this
+  is a design goal the pipeline is built around, not a guarantee. Prompt injection is
+  **mitigated for one specific, validated attack pattern — not eliminated**: a later
+  mitigation attempt did not stop a direct instruction-override attack against the live
+  model, and one lower-severity disclosure case remains open. See
+  [docs/SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md) for the full, dated
+  record.
 
 ## Architecture overview
 
@@ -152,23 +164,36 @@ curl http://localhost:6333/collections
 
 ## Testing
 
-```powershell
-# Team4B (the service covered by the Phase 5 RAG validation arc)
-cd team4b && python -m pytest -q
-# Expected: 1302 passed, 3 skipped, 1 known pre-existing failure (explained, not silenced — see docs/TESTING.md)
+**Re-run and reconfirmed on 2026-09-28** (a documentation consolidation pass) — these three
+commands, run separately, not chained, so a rerun of one never implies the others ran too:
 
-# Team4A
+```powershell
+# Team4A — pytest (913 passed, 5 skipped)
 cd team4a && python -m pytest -q
 
-# Team4C
-cd team4c
-npx tsc --noEmit && npx eslint . && npx vitest run && npx playwright test
-# Expected: 0 type errors, 469 Vitest tests passing, 13/13 Playwright tests passing,
-# 5/5 pages passing WCAG 2A/2AA accessibility checks
+# Team4B — pytest (1438 passed, 3 skipped, 1 known pre-existing failure,
+# explained not silenced — see docs/TESTING.md)
+cd team4b && python -m pytest -q
+
+# Team4C — TypeScript + unit/component tests only
+cd team4c && npx tsc --noEmit && npx vitest run
+# Expected: 0 type errors, 669 Vitest tests passing (62 files)
 ```
 
-Full detail, including how to distinguish a pre-existing issue from a
-regression: [docs/TESTING.md](docs/TESTING.md).
+**Not re-run on 2026-09-28** — these results are from an earlier point in the same
+development pass (dated in [docs/M6_STATUS.md](docs/M6_STATUS.md)); no code affecting them
+has changed since, but they are reported as-dated, not reconfirmed:
+
+```powershell
+cd team4c && npx eslint .          # 9 pre-existing errors / 3 warnings, all in untouched files
+cd team4c && npx playwright test   # 13/13 tests passing, across 7 spec files
+cd team4c && npm run build         # clean, all routes compile
+```
+
+**Test cases vs. spec files, so the "13" isn't ambiguous**: Playwright's 13 is a count of
+individual `test()` cases across 7 `.spec.ts` files — not 13 files. See
+[docs/TESTING.md](docs/TESTING.md) for the exact per-file breakdown and how to tell a
+pre-existing issue apart from a real regression.
 
 ## Production build
 
@@ -200,6 +225,9 @@ cd team4c && npm run build
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Completed vs. deferred vs. genuinely future work |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | High-level milestones |
 | [docs/M6_STATUS.md](docs/M6_STATUS.md) | Current, authoritative project status |
+| [docs/architecture/](docs/architecture/) | Final architecture diagrams — documentation and presentation (16:9) quality, PNG and editable SVG |
+| [docs/history/](docs/history/) | Superseded process/audit reports, kept for the project's evidence trail |
+| [docs/README.md](docs/README.md) | Full documentation index (all of the above, organized by topic) |
 
 ## Security notes
 
@@ -207,11 +235,13 @@ cd team4c && npm run build
   git-ignored. See [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md).
 - Service-to-service calls are authenticated with short-lived signed
   internal JWTs, never long-lived shared API keys.
-- Prompt injection is **mitigated, not eliminated** — a specific
+- Prompt injection is **mitigated, not eliminated**: (1) a specific
   forced-fixed-output attack pattern is fixed and validated (0/32 live
-  cases after the fix); one lower-severity residual (prompt-scaffold
-  disclosure, no real secret exists to leak) remains open and is tracked,
-  not hidden. See [docs/SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md).
+  cases after the fix); (2) a later query-neutralization attempt was tested live and
+  **did not** stop a direct instruction-override attack — it still fully succeeded
+  against the running model; (3) one lower-severity residual (prompt-scaffold
+  disclosure, no real secret exists to leak) remains open. All three are tracked, not
+  hidden. See [docs/SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md).
 
 ## Known limitations
 
@@ -253,10 +283,12 @@ a dedicated visual-polish/accessibility pass).
 └── scripts/          top-level orchestration (start-all/stop-all/health-check/e2e-smoke)
 ```
 
-A small number of gitignored backup/duplicate directories
-(`team4a-backup-before-transcript-windowing/`,
-`team4a-before-youtube-hindi-fallback/`, `team4b-context-provenance-temp/`,
-`team4c-validation/`) exist locally for rollback reference from earlier
-development but are intentionally excluded from version control and from
-any ZIP/GitHub distribution — see
-[docs/REPOSITORY_CLEANUP_REPORT.md](docs/REPOSITORY_CLEANUP_REPORT.md).
+One gitignored directory, `team4c-validation/`, exists locally — a
+disposable parallel instance of the product used for an isolated
+product-level RAG validation exercise (see
+[docs/m6-product-validation-isolation-environment.md](docs/m6-product-validation-isolation-environment.md)).
+It is intentionally excluded from version control and from any ZIP/GitHub
+distribution. Four older backup/duplicate directories that used to be
+listed here were reviewed and deleted on 2026-09-28 as part of a
+documentation and repository cleanup pass — see
+[docs/DOCUMENTATION_CLEANUP_2026-09-28.md](docs/DOCUMENTATION_CLEANUP_2026-09-28.md).

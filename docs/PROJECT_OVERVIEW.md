@@ -43,8 +43,10 @@ guessing.
 - Every answer's citations are independently re-verified against the
   caller's own workspace before being rendered — never trusted blindly
   from the retrieval layer.
-- Hybrid retrieval (semantic + keyword) so both conceptual and
-  exact-terminology questions are covered.
+- Hybrid retrieval (semantic + keyword), designed to improve coverage of both
+  conceptual and exact-terminology questions — not a guarantee that every question
+  retrieves the correct evidence; see [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for
+  measured, real gaps.
 
 ## User journey
 
@@ -74,9 +76,19 @@ content in either Qdrant collection as of the last audit — see
 
 ## Expected outputs
 
-A grounded, natural-language answer with one or more citations, each
-pointing to a specific PDF page or video timestamp range within the
-student's own uploaded material.
+One of three real, distinct outcomes, not a single guaranteed shape:
+
+- **A grounded answer** — natural-language, with one or more citations pointing to a
+  specific PDF page or video timestamp range within the student's own uploaded material.
+  This is the common, intended case, not the only possible one.
+- **An honest decline** — when retrieval finds no usable evidence for the question, the
+  system says so rather than guessing, with no citations attached.
+- **An incorrect or insufficiently-supported answer** — remains genuinely possible.
+  Retrieval can miss relevant material, or the model can misapply retrieved content
+  that is real and in-scope but not actually the right match for the question. Citation
+  presence does not by itself guarantee the answer's correctness. See
+  [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for documented, evidenced examples of
+  this third case.
 
 ## Product value
 
@@ -120,7 +132,7 @@ retrieved text."
 | Hybrid retrieval, grounded generation, citations | Cloud/hosted LLM option |
 | Workspace/account/document isolation | Multi-tenant production hardening |
 | Real auth, real product UI, full test suite | Object storage, horizontal scaling |
-| Local Docker/native infrastructure | Cloud deployment, observability, rate limiting |
+| Local Docker/native infrastructure | Cloud deployment, observability, system-wide rate limiting (Team4B's 3 most expensive routes already have it — see [SECURITY.md](SECURITY.md)) |
 
 Full current-vs-deferred breakdown: [M6_STATUS.md](M6_STATUS.md) and
 [ROADMAP.md](ROADMAP.md).

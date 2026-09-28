@@ -1,0 +1,78 @@
+<svg width="1920" height="1080" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg">
+<rect x="0" y="0" width="1920" height="1080" fill="#f7f8fb"/>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#4b5468"/>
+</marker>
+<marker id="arrowGreen" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#12734f"/>
+</marker>
+<marker id="arrowPurple" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#5e35b4"/>
+</marker>
+<marker id="arrowBlue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#2255c4"/>
+</marker>
+</defs>
+<text x="48.0" y="54.0" font-family="'Segoe UI', Arial, sans-serif" font-size="30" font-weight="800" fill="#1b2130" text-anchor="start">EDUCOPILOT M6 — DETAILED TECHNICAL ARCHITECTURE (OVERVIEW)</text>
+<text x="48.0" y="82.0" font-family="'Segoe UI', Arial, sans-serif" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">Ports, security, and RAG configuration highlights — full reference on the Technical Details slide</text>
+<rect x="48.0" y="120.0" width="896.0" height="220.0" rx="14" fill="#ffffff" stroke="#d7dbe3" stroke-width="1.3"/>
+<text x="74.0" y="154.0" font-family="'Segoe UI', Arial, sans-serif" font-size="17" font-weight="800" fill="#1b2130" text-anchor="start">LOCAL DEVELOPMENT PORTS</text>
+<text x="74.0" y="188.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Team 4C — Next.js</text>
+<text x="472.0" y="188.0" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700" fill="#12734f" text-anchor="end">:3000</text>
+<text x="74.0" y="222.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Team 4A — FastAPI</text>
+<text x="472.0" y="222.0" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700" fill="#12734f" text-anchor="end">:8001</text>
+<text x="74.0" y="256.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Team 4B — FastAPI</text>
+<text x="472.0" y="256.0" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700" fill="#12734f" text-anchor="end">:8002</text>
+<text x="74.0" y="290.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">MongoDB</text>
+<text x="472.0" y="290.0" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700" fill="#12734f" text-anchor="end">:27017</text>
+<text x="512.0" y="188.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Qdrant</text>
+<text x="910.0" y="188.0" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700" fill="#12734f" text-anchor="end">:6333</text>
+<text x="512.0" y="222.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Redis — Team4A</text>
+<text x="910.0" y="222.0" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700" fill="#12734f" text-anchor="end">:6379</text>
+<text x="512.0" y="256.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Redis — Team4B</text>
+<text x="910.0" y="256.0" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700" fill="#12734f" text-anchor="end">:6380</text>
+<text x="512.0" y="290.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Ollama</text>
+<text x="910.0" y="290.0" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700" fill="#12734f" text-anchor="end">:11434</text>
+<rect x="976.0" y="120.0" width="896.0" height="220.0" rx="14" fill="#fdf3f3" stroke="#e3a6a4" stroke-width="1.3"/>
+<text x="1002.0" y="154.0" font-family="'Segoe UI', Arial, sans-serif" font-size="17" font-weight="800" fill="#a83a38" text-anchor="start">SERVICE-TO-SERVICE SECURITY</text>
+<text x="1002.0" y="176.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.6" font-weight="400" fill="#6b5a5a" text-anchor="start">ES256 JWT, minted by Team4C before each Team4A/Team4B call</text>
+<text x="1002.0" y="204.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="400" fill="#a83a38" text-anchor="start">•</text>
+<text x="1018.0" y="204.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="400" fill="#6b5a5a" text-anchor="start">Claims: sub, workspace_id, scope, aud, iss, exp/kid (300s TTL)</text>
+<text x="1002.0" y="238.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="400" fill="#a83a38" text-anchor="start">•</text>
+<text x="1018.0" y="238.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="400" fill="#6b5a5a" text-anchor="start">Workspace isolation: assertOwnership() — “not found” and “not</text>
+<text x="1018.0" y="255.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="400" fill="#6b5a5a" text-anchor="start">yours” return the same 404</text>
+<text x="1002.0" y="272.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="400" fill="#a83a38" text-anchor="start">•</text>
+<text x="1018.0" y="272.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="400" fill="#6b5a5a" text-anchor="start">Generation-authority filter: fail-closed — unconfirmed</text>
+<text x="1018.0" y="289.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="400" fill="#6b5a5a" text-anchor="start">candidates are excluded, never trusted</text>
+<text x="1002.0" y="306.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="400" fill="#a83a38" text-anchor="start">•</text>
+<text x="1018.0" y="306.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="400" fill="#6b5a5a" text-anchor="start">Private signing key held by Team4C only; Team4A/4B verify with</text>
+<text x="1018.0" y="323.0" font-family="'Segoe UI', Arial, sans-serif" font-size="12.4" font-weight="400" fill="#6b5a5a" text-anchor="start">the public key</text>
+<rect x="48.0" y="372.0" width="896.0" height="420.0" rx="14" fill="#e6f6ee" stroke="#a4ddc0" stroke-width="1.6"/>
+<text x="74.0" y="408.0" font-family="'Segoe UI', Arial, sans-serif" font-size="19" font-weight="800" fill="#12734f" text-anchor="start">TEAM 4A — INGESTION</text>
+<text x="74.0" y="430.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="400" fill="#586176" text-anchor="start">7 REST endpoints  ·  1 canonical path, 3 legacy (Celery-queued)</text>
+<text x="74.0" y="472.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#12734f" text-anchor="start">•</text>
+<text x="92.0" y="472.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Embedding: all-MiniLM-L6-v2, 384-dim, cosine</text>
+<text x="74.0" y="515.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#12734f" text-anchor="start">•</text>
+<text x="92.0" y="515.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Chunking: 512 tokens, 50-token overlap</text>
+<text x="74.0" y="558.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#12734f" text-anchor="start">•</text>
+<text x="92.0" y="558.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Canonical write target: Qdrant “educopilot_chunks”</text>
+<text x="74.0" y="601.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#12734f" text-anchor="start">•</text>
+<text x="92.0" y="601.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Legacy write target: Qdrant “team4a_ingested_chunks”</text>
+<text x="92.0" y="622.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">(unused by current upload flow)</text>
+<rect x="976.0" y="372.0" width="896.0" height="420.0" rx="14" fill="#f2eaff" stroke="#d0b8f2" stroke-width="1.6"/>
+<text x="1002.0" y="408.0" font-family="'Segoe UI', Arial, sans-serif" font-size="19" font-weight="800" fill="#5e35b4" text-anchor="start">TEAM 4B — RETRIEVAL + GENERATION</text>
+<text x="1002.0" y="430.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13" font-weight="400" fill="#586176" text-anchor="start">7 REST endpoints  ·  hybrid search with citation-backed answers</text>
+<text x="1002.0" y="472.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#5e35b4" text-anchor="start">•</text>
+<text x="1020.0" y="472.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Fusion: Reciprocal Rank Fusion, k=60  ·  top_k /</text>
+<text x="1020.0" y="493.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">threshold: 5 / 0.30 (default)</text>
+<text x="1002.0" y="536.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#5e35b4" text-anchor="start">•</text>
+<text x="1020.0" y="536.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Reranker implemented, disabled by default</text>
+<text x="1002.0" y="579.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#5e35b4" text-anchor="start">•</text>
+<text x="1020.0" y="579.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Citations: document, page/section (PDF), start/end</text>
+<text x="1020.0" y="600.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">timestamp (video)</text>
+<text x="1002.0" y="643.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#5e35b4" text-anchor="start">•</text>
+<text x="1020.0" y="643.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">Generation-authority filter applied fail-closed,</text>
+<text x="1020.0" y="664.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#3a4152" text-anchor="start">before ranking</text>
+<text x="960.0" y="836.0" font-family="'Segoe UI', Arial, sans-serif" font-size="13.5" font-weight="400" fill="#7a8296" text-anchor="middle">Full endpoint list, ingestion configuration, and retrieval configuration: see the Technical Details slide</text>
+</svg>

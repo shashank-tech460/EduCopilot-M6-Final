@@ -19,8 +19,11 @@ full detail, only summarized.
   (never observed to leak across workspaces, only to misapply in-scope
   content from the wrong subject area within the same, correctly-isolated
   workspace).
-- **One lower-severity prompt-injection residual remains open** — see
-  [SECURITY.md](SECURITY.md) and [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md).
+- **Prompt injection is mitigated for one specific attack pattern, not eliminated.** A
+  later query-neutralization attempt did not prevent a direct instruction-override
+  attack against the live model, and a separate, lower-severity prompt-scaffold
+  disclosure case also remains open — see [SECURITY.md](SECURITY.md) and
+  [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md) for the exact, dated evidence.
 - **Local Ollama dependency**: generation requires a local Ollama
   instance with the configured model (`llama3`) pulled and running — no
   cloud LLM fallback exists.
@@ -45,7 +48,11 @@ full detail, only summarized.
   local Docker containers and native services on one development
   machine. No cloud deployment, load testing, or multi-machine setup has
   been performed or is claimed anywhere in this project.
-- **No rate limiting** on any API route.
+- **Rate limiting is partial, not system-wide**: only Team4B's `/api/v1/query`,
+  `/query/stream`, and `/evaluate` are rate-limited (30 req/60s per caller identity,
+  Redis-backed, fails open on a Redis outage). Team4A has none at all; Team4C has none;
+  Team4B's own session/history/health/metrics routes have none. See
+  [SECURITY.md](SECURITY.md) for the exact mechanism.
 - **No monitoring/observability** stack — structured logs exist per
   service, but nothing aggregates or alerts on them.
 

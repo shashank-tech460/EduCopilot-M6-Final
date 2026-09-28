@@ -34,6 +34,7 @@ from app.models.retrieval import RetrievalResult
 from app.services.bm25_index import BM25Document, BM25Index
 from app.services.generation_authority import GenerationAuthorityUnavailableError
 from app.services.hybrid_retriever import HybridRetriever, InvalidSearchModeError
+from app.services.llm_generator import GenerationResult
 from app.services.reranker import RerankerUnavailableError
 from app.services.response_assembly import assemble_query_response, to_source_attribution
 from app.services.vector_store import ContextChunk, VectorStoreManager
@@ -547,7 +548,11 @@ class _FakeLLMGeneratorForSession:
 
     def generate(self, query, retrieval_results, *, conversation_history):
         self.generate_calls.append({"query": query, "history": list(conversation_history)})
-        return f"answer to: {query}"
+        # Stage 8: matches the real LLMGenerator.generate()'s updated
+        # return type (GenerationResult, not a bare string) -- grounded
+        # is not exercised by this file's own architecture-generalization
+        # tests, so `None` ("no signal") is the correct, inert default.
+        return GenerationResult(answer=f"answer to: {query}", grounded=None)
 
     def generate_conversational(self, query, *, conversation_history):
         return f"conversational answer to: {query}"

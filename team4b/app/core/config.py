@@ -392,6 +392,36 @@ class Settings(BaseSettings):
         description="JSON-encoded {kid: PEM public key} map. NEVER a private key -- verification-only.",
     )
 
+    # ------------------------------------------------------------------
+    # Security Hardening Stage 1 -- CORS
+    # ------------------------------------------------------------------
+    #: This is a purely internal, service-to-service API (Team 4C's
+    #: server calls it with a service JWT that is never exposed to a
+    #: browser; no legitimate browser origin should ever call it
+    #: directly). The correct default deployment posture is therefore NO
+    #: cross-origin browser access at all -- an empty list here means
+    #: `create_app()` adds no permissive `Access-Control-Allow-Origin`
+    #: header, matching FastAPI/Starlette's own un-configured default
+    #: exactly, but now an explicit, auditable decision rather than an
+    #: accidental omission. Left overridable (never hard-coded) only in
+    #: case a genuinely new deployment shape needs it -- never widened
+    #: automatically by this codebase.
+    cors_allowed_origins: list[str] = Field(default_factory=list)
+
+    # ------------------------------------------------------------------
+    # Security Hardening Stage 1 -- rate limiting for expensive operations
+    # ------------------------------------------------------------------
+    #: Bounds how many expensive calls (real LLM generation or a real
+    #: RAGAS/embedding batch) one authenticated internal-service identity
+    #: (the JWT's own `sub`+`workspace_id`) may make per rolling window --
+    #: a defense-in-depth control against a compromised/misbehaving
+    #: caller driving unbounded LLM/embedding cost, not a general traffic
+    #: shaper. Deliberately generous: this must never throttle this
+    #: product's own real, legitimate chat/evaluation traffic under
+    #: normal use.
+    rate_limit_requests_per_window: int = Field(default=30, gt=0)
+    rate_limit_window_seconds: int = Field(default=60, gt=0)
+
     @field_validator("log_level")
     @classmethod
     def _log_level_must_be_a_known_level(cls, value: str) -> str:
